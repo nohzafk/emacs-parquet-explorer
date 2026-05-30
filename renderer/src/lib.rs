@@ -441,11 +441,14 @@ impl EguiEmacsApp for ExplorerApp {
                                         for (col_idx, col) in table.columns.iter().enumerate() {
                                             if !self.hidden_columns.contains(col) {
                                                 let col_width = column_widths[col_idx];
-                                                // Left-align header text and add padding to match SelectableLabel
-                                                ui.allocate_ui(egui::vec2(col_width, 24.0), |ui| {
+                                                // Allocate exact size to guarantee the grid column takes up exactly `col_width` pixels
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(col_width, 24.0),
+                                                    egui::Sense::hover()
+                                                );
+                                                ui.allocate_ui_at_rect(rect, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        ui.add_space(6.0);
-                                                        // Ensure header text is left-aligned, sized exactly to fit, and truncated if column width is exceeded
+                                                        ui.add_space(6.0); // left padding matching selectable label
                                                         ui.add_sized(
                                                             [col_width - 12.0, 20.0],
                                                             egui::Label::new(egui::RichText::new(col).heading()).truncate()

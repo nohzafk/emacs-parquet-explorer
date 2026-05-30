@@ -108,7 +108,7 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
 
     let mut count = 0;
     for record in row_iter {
-        if count >= 10000 {
+        if count >= 100000 {
             break;
         }
         let record = record.map_err(|e| e.to_string())?;
@@ -365,45 +365,53 @@ impl EguiEmacsApp for ExplorerApp {
 
                                 ui.add_space(4.0);
 
-                                // Inner scroll area: Vertical only (scrolls rows, pins headers)
-                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                                    egui::Grid::new("rows_grid")
-                                        .striped(true)
-                                        .min_row_height(22.0)
-                                        .min_col_width(140.0)
-                                        .spacing(egui::vec2(12.0, 4.0))
-                                        .show(ui, |ui| {
-                                            // Draw rows in current page
-                                            for (_p_idx, &row_idx) in filtered_rows[start_idx..end_idx].iter().enumerate() {
-                                                let actual_row = &table.rows[row_idx];
-                                                for (col_idx, cell) in actual_row.iter().enumerate() {
-                                                    let is_selected = self.selected_cell == Some((row_idx, col_idx));
-                                                    
-                                                    // Cell label button
-                                                    let cell_text = if cell.len() > 30 {
-                                                        format!("{}...", &cell[0..27])
-                                                    } else {
-                                                        cell.clone()
-                                                    };
+                                // Inner scroll area: Vertical only with virtual scrolling (scrolls rows, pins headers)
+                                let row_height = 22.0;
+                                let num_visible_rows = end_idx - start_idx;
+                                egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+                                    ui,
+                                    row_height,
+                                    num_visible_rows,
+                                    |ui, row_range| {
+                                        egui::Grid::new("rows_grid")
+                                            .striped(true)
+                                            .min_row_height(row_height)
+                                            .min_col_width(140.0)
+                                            .spacing(egui::vec2(12.0, 4.0))
+                                            .show(ui, |ui| {
+                                                // Draw only the visible rows in current range
+                                                for row_offset in row_range {
+                                                    let row_idx = filtered_rows[start_idx + row_offset];
+                                                    let actual_row = &table.rows[row_idx];
+                                                    for (col_idx, cell) in actual_row.iter().enumerate() {
+                                                        let is_selected = self.selected_cell == Some((row_idx, col_idx));
+                                                        
+                                                        // Cell label button
+                                                        let cell_text = if cell.len() > 30 {
+                                                            format!("{}...", &cell[0..27])
+                                                        } else {
+                                                            cell.clone()
+                                                        };
 
-                                                    let resp = ui.selectable_label(is_selected, cell_text);
-                                                    if resp.clicked() {
-                                                        self.selected_cell = Some((row_idx, col_idx));
-                                                        // POST message back to Emacs host!
-                                                        emacs_egui_sdk::emacs_post_message(
-                                                            "cell-selected",
-                                                            serde_json::json!({
-                                                                "row": row_idx,
-                                                                "column": table.columns[col_idx].clone(),
-                                                                "value": cell.clone()
-                                                            })
-                                                        );
+                                                        let resp = ui.selectable_label(is_selected, cell_text);
+                                                        if resp.clicked() {
+                                                            self.selected_cell = Some((row_idx, col_idx));
+                                                            // POST message back to Emacs host!
+                                                            emacs_egui_sdk::emacs_post_message(
+                                                                "cell-selected",
+                                                                serde_json::json!({
+                                                                    "row": row_idx,
+                                                                    "column": table.columns[col_idx].clone(),
+                                                                    "value": cell.clone()
+                                                                })
+                                                            );
+                                                        }
                                                     }
+                                                    ui.end_row();
                                                 }
-                                                ui.end_row();
-                                            }
-                                        });
-                                });
+                                            });
+                                    }
+                                );
                             });
                         });
                     }

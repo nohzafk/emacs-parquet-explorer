@@ -328,7 +328,11 @@ impl EguiEmacsApp for ExplorerApp {
                             if ui.button("◀ Prev").clicked() && self.page_offset >= self.page_size {
                                 self.page_offset -= self.page_size;
                             }
-                            ui.label(format!("Showing {}-{} of {} filtered", start_idx + 1, end_idx, total_filtered));
+                            ui.add_space(4.0);
+
+                            ui.label(format!("Showing {}-{} filtered", start_idx + 1, end_idx));
+                            ui.add_space(4.0);
+
                             if ui.button("Next ▶").clicked() && self.page_offset + self.page_size < total_filtered {
                                 self.page_offset += self.page_size;
                             }

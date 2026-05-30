@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Parquet Explorer — emacs-egui framework</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: transparent;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            background-color: transparent;
+            opacity: 0;
+            transition: opacity 80ms ease-out;
+        }
+        canvas.ready {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="egui-canvas"></canvas>
+    <script type="module">
+        import init, { start_app, egui_push_state, egui_push_theme } from "./pkg/emacs_parquet_explorer_renderer.js";
+
+        // Extract theme parameters and session context from URL hash/fragment.
+        function parseInitialParams() {
+            const hash = window.location.hash.replace(/^#/, "");
+            if (!hash) return null;
+            const params = new URLSearchParams(hash);
+            const bg = params.get("bg");
+            const fg = params.get("fg");
+            const fontSize = params.get("font-size");
+            const surfaceBg = params.get("surface-bg");
+            const session = params.get("session");
+            const port = params.get("port");
+            return {
+                bg,
+                fg,
+                fontSize: fontSize ? Number(fontSize) : null,
+                surfaceBg: surfaceBg || null,
+                session,
+                port: port ? Number(port) : null
+            };
+        }
+
+        async function run() {
+            try {
+                const canvas = document.getElementById("egui-canvas");
+                await init();
+
+                const params = parseInitialParams();
+                if (params && params.session) {
+                    console.log("Starting app session: " + params.session);
+                }
+
+                // Mount the egui application onto the canvas
+                await start_app("egui-canvas");
+
+                // Inject initial theme immediately to prevent flashing
+                if (params && params.bg && params.fg) {
+                    try {
+                        egui_push_theme(JSON.stringify({
+                            bg: params.bg,
+                            fg: params.fg,
+                            "font-size": params.fontSize,
+                            "surface-bg": params.surfaceBg
+                        }));
+                    } catch (e) {
+                        console.error("Theme injection error:", e);
+                    }
+                }
+                
+                requestAnimationFrame(() => canvas.classList.add("ready"));
+
+                // Expose bindings to global window space for the Elisp Host
+                window.eguiPushState = (jsonStr) => {
+                    try {
+                        egui_push_state(jsonStr);
+                    } catch (e) {
+                        console.error("State sync error:", e);
+                    }
+                };
+
+                window.eguiPushTheme = (jsonStr) => {
+                    try {
+                        egui_push_theme(jsonStr);
+                    } catch (e) {
+                        console.error("Theme sync error:", e);
+                    }
+                };
+
+                console.log("Parquet Explorer WASM successfully loaded.");
+            } catch (err) {
+                console.error("Failed to initialize WASM application:", err);
+            }
+        }
+
+        run();
+    </script>
+</body>
+</html>

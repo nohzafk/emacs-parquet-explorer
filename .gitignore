@@ -1,0 +1,5 @@
+/renderer/target/
+/renderer/pkg/
+/test.parquet
+/yellow_tripdata_2023-01.parquet
+.DS_Store

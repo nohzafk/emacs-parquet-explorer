@@ -379,27 +379,12 @@ impl EguiEmacsApp for ExplorerApp {
                                 }
                             });
                         });
-                    }
-                });
-                ui.add_space(4.0);
-
-                match self.view_mode {
-                    ViewMode::Data => {
-                        // Statistics & Filters
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
-                            ui.add_space(20.0);
-                            ui.label("Search:");
-                            if ui.text_edit_singleline(&mut self.search_query).changed() {
-                                self.page_offset = 0; // reset paging
-                            }
-                        });
 
                         if self.filter_col.is_empty() && !table.columns.is_empty() {
                             self.filter_col = table.columns[0].clone();
                         }
 
-                        // Collapsible Predicate Filters panel
+                        ui.add_space(20.0);
                         ui.collapsing("🔍 Predicate Filters", |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
                             
@@ -475,6 +460,21 @@ impl EguiEmacsApp for ExplorerApp {
                                     }
                                 }
                             });
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+
+                match self.view_mode {
+                    ViewMode::Data => {
+                        // Statistics & Filters
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
+                            ui.add_space(20.0);
+                            ui.label("Search:");
+                            if ui.text_edit_singleline(&mut self.search_query).changed() {
+                                self.page_offset = 0; // reset paging
+                            }
                         });
 
 

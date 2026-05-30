@@ -612,17 +612,10 @@ impl EguiEmacsApp for ExplorerApp {
                                 format!("Rows: {} (filtered to {})", table.rows.len(), total_filtered)
                             };
 
-                            let active_flags = match (!self.hidden_columns.is_empty(), !self.filters.is_empty() || !self.search_query.is_empty()) {
-                                (true, true) => " [Pruning & Filters Active]",
-                                (true, false) => " [Pruning Active]",
-                                (false, true) => " [Filters Active]",
-                                (false, false) => "",
-                            };
-
                             if !self.hidden_columns.is_empty() || !self.filters.is_empty() || !self.search_query.is_empty() {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(230, 140, 10),
-                                    format!("{}  |  {}{}", cols_label, rows_label, active_flags)
+                                    format!("{}  |  {}", cols_label, rows_label)
                                 );
                             } else {
                                 ui.label(format!("{}  |  {}", cols_label, rows_label));

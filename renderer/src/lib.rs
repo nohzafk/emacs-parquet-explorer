@@ -307,32 +307,36 @@ impl EguiEmacsApp for ExplorerApp {
                     let col_name = table.columns[col].clone();
                     
                     egui::TopBottomPanel::bottom("details_panel")
-                        .resizable(true)
-                        .default_height(90.0)
-                        .min_height(60.0)
+                        .resizable(false)
+                        .default_height(26.0)
                         .show(ctx, |ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
-                            ui.separator();
                             ui.horizontal(|ui| {
-                                ui.heading("🔍 Selected Cell Details");
-                                ui.label(egui::RichText::new(format!("Column: {}", col_name)).weak());
-                                
-                                ui.add_space(20.0);
-                                if ui.button("🔍 Filter by selection").clicked() {
-                                    let filter = ColumnFilter {
-                                        column: col_name.clone(),
-                                        operator: "=".to_string(),
-                                        value: cell_value.clone(),
-                                    };
-                                    if !self.filters.contains(&filter) {
-                                        self.filters.push(filter);
-                                        self.page_offset = 0;
-                                        self.show_filters_panel = true;
+                                ui.label("🔍");
+                                ui.weak(&col_name);
+
+                                // Right-aligned button
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("🔍 Filter by selection").clicked() {
+                                        let filter = ColumnFilter {
+                                            column: col_name.clone(),
+                                            operator: "=".to_string(),
+                                            value: cell_value.clone(),
+                                        };
+                                        if !self.filters.contains(&filter) {
+                                            self.filters.push(filter);
+                                            self.page_offset = 0;
+                                            self.show_filters_panel = true;
+                                        }
                                     }
-                                }
-                            });
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                ui.label(&cell_value);
+                                });
+
+                                // Cell value
+                                let display_val = if cell_value.len() > 150 {
+                                    format!("{}...", &cell_value[0..147])
+                                } else {
+                                    cell_value.clone()
+                                };
+                                ui.label(display_val);
                             });
                         });
                 }

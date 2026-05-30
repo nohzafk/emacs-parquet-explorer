@@ -308,11 +308,11 @@ impl EguiEmacsApp for ExplorerApp {
                     
                     egui::TopBottomPanel::bottom("details_panel")
                         .resizable(false)
-                        .default_height(36.0)
+                        .default_height(40.0)
                         .show(ctx, |ui| {
-                            ui.add_space(4.0); // comfortable top margin
+                            ui.add_space(6.0); // comfortable top margin
                             ui.horizontal(|ui| {
-                                ui.add_space(6.0); // left margin
+                                ui.add_space(8.0); // left margin
                                 ui.label("🔍");
                                 ui.weak(format!("{}:", col_name));
 
@@ -322,11 +322,11 @@ impl EguiEmacsApp for ExplorerApp {
                                 } else {
                                     cell_value.clone()
                                 };
-                                ui.label(display_val);
+                                ui.add(egui::Label::new(display_val).selectable(true));
 
                                 // Right-aligned button
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add_space(6.0); // right margin
+                                    ui.add_space(8.0); // right margin
                                     if ui.button("🔍 Filter by selection").clicked() {
                                         let filter = ColumnFilter {
                                             column: col_name.clone(),
@@ -341,7 +341,7 @@ impl EguiEmacsApp for ExplorerApp {
                                     }
                                 });
                             });
-                            ui.add_space(4.0); // comfortable bottom margin
+                            ui.add_space(6.0); // comfortable bottom margin
                         });
                 }
             }
@@ -374,8 +374,13 @@ impl EguiEmacsApp for ExplorerApp {
 
                     if self.view_mode == ViewMode::Data {
                         ui.add_space(20.0);
-                        let text = if self.show_pruning_panel { "📐 Column Visibility & Pruning ▲" } else { "📐 Column Visibility & Pruning ▼" };
-                        if ui.selectable_label(self.show_pruning_panel, text).clicked() {
+                        let text = if self.hidden_columns.is_empty() {
+                            if self.show_pruning_panel { "📐 Column Visibility & Pruning ▲" } else { "📐 Column Visibility & Pruning ▼" }.to_string()
+                        } else {
+                            let dir = if self.show_pruning_panel { "▲" } else { "▼" };
+                            format!("📐 Column Visibility & Pruning ({} hidden) {}", self.hidden_columns.len(), dir)
+                        };
+                        if ui.selectable_label(self.show_pruning_panel, &text).clicked() {
                             self.show_pruning_panel = !self.show_pruning_panel;
                         }
 
@@ -400,6 +405,15 @@ impl EguiEmacsApp for ExplorerApp {
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
+                                        if !self.hidden_columns.is_empty() {
+                                            let btn = egui::Button::new(egui::RichText::new("👁 Show All").color(egui::Color32::WHITE))
+                                                .fill(egui::Color32::from_rgb(45, 55, 75))
+                                                .rounding(4.0);
+                                            if ui.add(btn).clicked() {
+                                                self.hidden_columns.clear();
+                                            }
+                                            ui.add_space(8.0);
+                                        }
                                         for col in &table.columns {
                                             let is_visible = !self.hidden_columns.contains(col);
                                             let mut temp_visible = is_visible;
@@ -586,18 +600,32 @@ impl EguiEmacsApp for ExplorerApp {
 
                         // Statistics & Filters
                         ui.horizontal(|ui| {
-                            if self.filters.is_empty() && self.search_query.is_empty() {
-                                ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
+                            let cols_label = if self.hidden_columns.is_empty() {
+                                format!("Columns: {}", table.columns.len())
                             } else {
+                                format!("Columns: {} ({} hidden)", table.columns.len(), self.hidden_columns.len())
+                            };
+                            
+                            let rows_label = if self.filters.is_empty() && self.search_query.is_empty() {
+                                format!("Rows: {}", table.rows.len())
+                            } else {
+                                format!("Rows: {} (filtered to {})", table.rows.len(), total_filtered)
+                            };
+
+                            let active_flags = match (!self.hidden_columns.is_empty(), !self.filters.is_empty() || !self.search_query.is_empty()) {
+                                (true, true) => " [Pruning & Filters Active]",
+                                (true, false) => " [Pruning Active]",
+                                (false, true) => " [Filters Active]",
+                                (false, false) => "",
+                            };
+
+                            if !self.hidden_columns.is_empty() || !self.filters.is_empty() || !self.search_query.is_empty() {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(230, 140, 10),
-                                    format!(
-                                        "Columns: {}  |  Rows: {} (filtered to {}) [Filters Active]",
-                                        table.columns.len(),
-                                        table.rows.len(),
-                                        total_filtered
-                                    )
+                                    format!("{}  |  {}{}", cols_label, rows_label, active_flags)
                                 );
+                            } else {
+                                ui.label(format!("{}  |  {}", cols_label, rows_label));
                             }
                             ui.add_space(20.0);
                             ui.label("Search:");

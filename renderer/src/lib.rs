@@ -1,7 +1,6 @@
 use emacs_egui_sdk::{EguiEmacsApp, ThemeColors};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
 
@@ -16,10 +15,29 @@ pub struct ExplorerState {
     pub filepath: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SchemaField {
+    pub name: String,
+    pub physical_type: String,
+    pub logical_type: String,
+    pub nullable: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FileStats {
+    pub total_rows: i64,
+    pub num_row_groups: usize,
+    pub version: i32,
+    pub created_by: String,
+    pub compression_codecs: Vec<String>,
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct ParquetTable {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    pub schema: Vec<SchemaField>,
+    pub stats: FileStats,
 }
 
 fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
@@ -32,6 +50,57 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
     let columns: Vec<String> = (0..schema_descr.num_columns())
         .map(|i| schema_descr.column(i).name().to_string())
         .collect();
+
+    let mut schema = Vec::new();
+    for i in 0..schema_descr.num_columns() {
+        let col_descr = schema_descr.column(i);
+        let name = col_descr.name().to_string();
+        let physical_type = col_descr.physical_type().to_string();
+        
+        let converted_type = col_descr.converted_type();
+        let logical_type_str = if let Some(ref lt) = col_descr.logical_type() {
+            format!("{:?}", lt)
+        } else if converted_type != parquet::basic::ConvertedType::NONE {
+            converted_type.to_string()
+        } else {
+            "NONE".to_string()
+        };
+
+        let repetition = col_descr.self_type_ptr().get_basic_info().repetition();
+        let nullable = repetition != parquet::basic::Repetition::REQUIRED;
+
+        schema.push(SchemaField {
+            name,
+            physical_type,
+            logical_type: logical_type_str,
+            nullable,
+        });
+    }
+
+    // Extract File Stats
+    let total_rows = file_metadata.num_rows();
+    let num_row_groups = reader.metadata().num_row_groups();
+    let version = file_metadata.version();
+    let created_by = file_metadata.created_by().unwrap_or("unknown").to_string();
+
+    let mut codec_set = std::collections::HashSet::new();
+    for rg_idx in 0..num_row_groups {
+        let rg_meta = reader.metadata().row_group(rg_idx);
+        for col_idx in 0..schema_descr.num_columns() {
+            let col_meta = rg_meta.column(col_idx);
+            codec_set.insert(col_meta.compression().to_string());
+        }
+    }
+    let mut compression_codecs: Vec<String> = codec_set.into_iter().collect();
+    compression_codecs.sort();
+
+    let stats = FileStats {
+        total_rows,
+        num_row_groups,
+        version,
+        created_by,
+        compression_codecs,
+    };
 
     // 2. Read Rows (cap at 10,000 for high-performance virtual rendering inside WASM)
     let mut rows = Vec::new();
@@ -51,7 +120,7 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         count += 1;
     }
 
-    Ok(ParquetTable { columns, rows })
+    Ok(ParquetTable { columns, rows, schema, stats })
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, JsValue> {
@@ -73,6 +142,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, JsValue> {
     Ok(bytes)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewMode {
+    Data,
+    Schema,
+}
+
 pub struct ExplorerApp {
     filepath: String,
     session_id: String,
@@ -84,6 +159,7 @@ pub struct ExplorerApp {
     selected_cell: Option<(usize, usize)>,
     page_offset: usize,
     page_size: usize,
+    view_mode: ViewMode,
 }
 
 impl ExplorerApp {
@@ -99,6 +175,7 @@ impl ExplorerApp {
             selected_cell: None,
             page_offset: 0,
             page_size: 100,
+            view_mode: ViewMode::Data,
         }
     }
 }
@@ -164,24 +241,26 @@ impl EguiEmacsApp for ExplorerApp {
             }
         }
 
-        // 1. Draw resizable bottom details panel first (if selection exists)
-        if let Some(ref table) = self.parquet_table {
-            if let Some((row, col)) = self.selected_cell {
-                egui::TopBottomPanel::bottom("details_panel")
-                    .resizable(true)
-                    .default_height(90.0)
-                    .min_height(60.0)
-                    .show(ctx, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.heading("🔍 Selected Cell Details");
-                            ui.label(egui::RichText::new(format!("Column: {}", table.columns[col])).weak());
+        // 1. Draw resizable bottom details panel first (if selection exists and in Data view)
+        if self.view_mode == ViewMode::Data {
+            if let Some(ref table) = self.parquet_table {
+                if let Some((row, col)) = self.selected_cell {
+                    egui::TopBottomPanel::bottom("details_panel")
+                        .resizable(true)
+                        .default_height(90.0)
+                        .min_height(60.0)
+                        .show(ctx, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.heading("🔍 Selected Cell Details");
+                                ui.label(egui::RichText::new(format!("Column: {}", table.columns[col])).weak());
+                            });
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                ui.label(&table.rows[row][col]);
+                            });
                         });
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            ui.label(&table.rows[row][col]);
-                        });
-                    });
+                }
             }
         }
 
@@ -205,119 +284,205 @@ impl EguiEmacsApp for ExplorerApp {
             ui.label(egui::RichText::new(format!("File: {}", self.filepath)).weak());
 
             if let Some(ref table) = self.parquet_table {
-                // Statistics & Filters
+                // View Mode Select Tabs
                 ui.horizontal(|ui| {
-                    ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
-                    ui.add_space(20.0);
-                    ui.label("Search:");
-                    ui.text_edit_singleline(&mut self.search_query);
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Data, "🗃 Data View");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Schema, "📋 Schema & Metadata");
                 });
+                ui.add_space(4.0);
 
-                // Filter row indices matching search
-                let filtered_rows: Vec<usize> = if self.search_query.is_empty() {
-                    (0..table.rows.len()).collect()
-                } else {
-                    let query = self.search_query.to_lowercase();
-                    (0..table.rows.len())
-                        .filter(|&i| {
-                            table.rows[i].iter().any(|cell| cell.to_lowercase().contains(&query))
-                        })
-                        .collect()
-                };
+                match self.view_mode {
+                    ViewMode::Data => {
+                        // Statistics & Filters
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
+                            ui.add_space(20.0);
+                            ui.label("Search:");
+                            ui.text_edit_singleline(&mut self.search_query);
+                        });
 
-                // Paging Control
-                let total_filtered = filtered_rows.len();
-                let start_idx = self.page_offset;
-                let end_idx = (start_idx + self.page_size).min(total_filtered);
+                        // Filter row indices matching search
+                        let filtered_rows: Vec<usize> = if self.search_query.is_empty() {
+                            (0..table.rows.len()).collect()
+                        } else {
+                            let query = self.search_query.to_lowercase();
+                            (0..table.rows.len())
+                                .filter(|&i| {
+                                    table.rows[i].iter().any(|cell| cell.to_lowercase().contains(&query))
+                                })
+                                .collect()
+                        };
 
-                ui.horizontal(|ui| {
-                    if ui.button("◀ Prev").clicked() && self.page_offset >= self.page_size {
-                        self.page_offset -= self.page_size;
-                    }
-                    ui.label(format!("Showing {}-{} of {} filtered", start_idx + 1, end_idx, total_filtered));
-                    if ui.button("Next ▶").clicked() && self.page_offset + self.page_size < total_filtered {
-                        self.page_offset += self.page_size;
-                    }
+                        // Paging Control
+                        let total_filtered = filtered_rows.len();
+                        let start_idx = self.page_offset;
+                        let end_idx = (start_idx + self.page_size).min(total_filtered);
 
-                    ui.add_space(20.0);
-                    ui.label("Page Size:");
-                    for size in [100, 500, 1000] {
-                        if ui.selectable_label(self.page_size == size, format!("{}", size)).clicked() {
-                            self.page_size = size;
-                            self.page_offset = 0; // reset
-                        }
-                    }
+                        ui.horizontal(|ui| {
+                            if ui.button("◀ Prev").clicked() && self.page_offset >= self.page_size {
+                                self.page_offset -= self.page_size;
+                            }
+                            ui.label(format!("Showing {}-{} of {} filtered", start_idx + 1, end_idx, total_filtered));
+                            if ui.button("Next ▶").clicked() && self.page_offset + self.page_size < total_filtered {
+                                self.page_offset += self.page_size;
+                            }
 
-                    ui.add_space(8.0);
-                    ui.label("Custom:");
-                    let mut temp_size = self.page_size;
-                    let resp = ui.add(egui::DragValue::new(&mut temp_size).range(1..=10000).speed(5.0));
-                    if resp.changed() {
-                        self.page_size = temp_size;
-                        self.page_offset = 0; // reset
-                    }
-                });
-
-                ui.separator();
-
-                // 2. Data Table Grid
-                // Outer scroll area: Horizontal only (synchronizes header + data columns horizontally)
-                egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        // Sticky Header Grid
-                        egui::Grid::new("header_grid")
-                            .min_col_width(140.0)
-                            .spacing(egui::vec2(12.0, 4.0))
-                            .show(ui, |ui| {
-                                for col in &table.columns {
-                                    ui.heading(col);
+                            ui.add_space(20.0);
+                            ui.label("Page Size:");
+                            for size in [100, 500, 1000] {
+                                if ui.selectable_label(self.page_size == size, format!("{}", size)).clicked() {
+                                    self.page_size = size;
+                                    self.page_offset = 0; // reset
                                 }
-                                ui.end_row();
-                            });
+                            }
 
-                        ui.add_space(4.0);
+                            ui.add_space(8.0);
+                            ui.label("Custom:");
+                            let mut temp_size = self.page_size;
+                            let resp = ui.add(egui::DragValue::new(&mut temp_size).range(1..=10000).speed(5.0));
+                            if resp.changed() {
+                                self.page_size = temp_size;
+                                self.page_offset = 0; // reset
+                            }
+                        });
 
-                        // Inner scroll area: Vertical only (scrolls rows, pins headers)
-                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                            egui::Grid::new("rows_grid")
-                                .striped(true)
-                                .min_row_height(22.0)
-                                .min_col_width(140.0)
-                                .spacing(egui::vec2(12.0, 4.0))
-                                .show(ui, |ui| {
-                                    // Draw rows in current page
-                                    for (_p_idx, &row_idx) in filtered_rows[start_idx..end_idx].iter().enumerate() {
-                                        let actual_row = &table.rows[row_idx];
-                                        for (col_idx, cell) in actual_row.iter().enumerate() {
-                                            let is_selected = self.selected_cell == Some((row_idx, col_idx));
-                                            
-                                            // Cell label button
-                                            let cell_text = if cell.len() > 30 {
-                                                format!("{}...", &cell[0..27])
-                                            } else {
-                                                cell.clone()
-                                            };
+                        ui.separator();
 
-                                            let resp = ui.selectable_label(is_selected, cell_text);
-                                            if resp.clicked() {
-                                                self.selected_cell = Some((row_idx, col_idx));
-                                                // POST message back to Emacs host!
-                                                emacs_egui_sdk::emacs_post_message(
-                                                    "cell-selected",
-                                                    serde_json::json!({
-                                                        "row": row_idx,
-                                                        "column": table.columns[col_idx].clone(),
-                                                        "value": cell.clone()
-                                                    })
-                                                );
-                                            }
+                        // 2. Data Table Grid
+                        // Outer scroll area: Horizontal only (synchronizes header + data columns horizontally)
+                        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                // Sticky Header Grid
+                                egui::Grid::new("header_grid")
+                                    .min_col_width(140.0)
+                                    .spacing(egui::vec2(12.0, 4.0))
+                                    .show(ui, |ui| {
+                                        for col in &table.columns {
+                                            ui.heading(col);
                                         }
                                         ui.end_row();
+                                    });
+
+                                ui.add_space(4.0);
+
+                                // Inner scroll area: Vertical only (scrolls rows, pins headers)
+                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    egui::Grid::new("rows_grid")
+                                        .striped(true)
+                                        .min_row_height(22.0)
+                                        .min_col_width(140.0)
+                                        .spacing(egui::vec2(12.0, 4.0))
+                                        .show(ui, |ui| {
+                                            // Draw rows in current page
+                                            for (_p_idx, &row_idx) in filtered_rows[start_idx..end_idx].iter().enumerate() {
+                                                let actual_row = &table.rows[row_idx];
+                                                for (col_idx, cell) in actual_row.iter().enumerate() {
+                                                    let is_selected = self.selected_cell == Some((row_idx, col_idx));
+                                                    
+                                                    // Cell label button
+                                                    let cell_text = if cell.len() > 30 {
+                                                        format!("{}...", &cell[0..27])
+                                                    } else {
+                                                        cell.clone()
+                                                    };
+
+                                                    let resp = ui.selectable_label(is_selected, cell_text);
+                                                    if resp.clicked() {
+                                                        self.selected_cell = Some((row_idx, col_idx));
+                                                        // POST message back to Emacs host!
+                                                        emacs_egui_sdk::emacs_post_message(
+                                                            "cell-selected",
+                                                            serde_json::json!({
+                                                                "row": row_idx,
+                                                                "column": table.columns[col_idx].clone(),
+                                                                "value": cell.clone()
+                                                            })
+                                                        );
+                                                    }
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                            });
+                        });
+                    }
+                    ViewMode::Schema => {
+                        ui.columns(2, |columns| {
+                            // Column 0: File properties card
+                            columns[0].vertical(|ui| {
+                                ui.group(|ui| {
+                                    ui.heading("📋 Physical Properties");
+                                    ui.separator();
+                                    
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Total Rows:");
+                                        ui.label(format!("{}", table.stats.total_rows));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Row Groups:");
+                                        ui.label(format!("{}", table.stats.num_row_groups));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Parquet Version:");
+                                        ui.label(format!("{}", table.stats.version));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Created By:");
+                                        ui.label(&table.stats.created_by);
+                                    });
+                                    ui.add_space(4.0);
+                                    ui.strong("Compression Codecs:");
+                                    if table.stats.compression_codecs.is_empty() {
+                                        ui.label(egui::RichText::new("None").weak());
+                                    } else {
+                                        for codec in &table.stats.compression_codecs {
+                                            ui.label(format!("• {}", codec));
+                                        }
                                     }
                                 });
+                            });
+
+                            // Column 1: Schema descriptor table
+                            columns[1].vertical(|ui| {
+                                ui.heading("🧬 Schema & Type Discovery");
+                                ui.separator();
+                                
+                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    egui::Grid::new("schema_grid")
+                                        .striped(true)
+                                        .min_row_height(22.0)
+                                        .min_col_width(80.0)
+                                        .spacing(egui::vec2(16.0, 6.0))
+                                        .show(ui, |ui| {
+                                            // Table Header
+                                            ui.strong("#");
+                                            ui.strong("Column Name");
+                                            ui.strong("Physical Type");
+                                            ui.strong("Logical Type");
+                                            ui.strong("Nullable?");
+                                            ui.end_row();
+
+                                            // Table Body
+                                            for (idx, field) in table.schema.iter().enumerate() {
+                                                ui.label(format!("{}", idx + 1));
+                                                ui.label(egui::RichText::new(&field.name).strong());
+                                                ui.label(&field.physical_type);
+                                                ui.label(&field.logical_type);
+                                                
+                                                if field.nullable {
+                                                    ui.colored_label(egui::Color32::from_rgb(120, 160, 230), "Yes");
+                                                } else {
+                                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), "No");
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                            });
                         });
-                    });
-                });
+                    }
+                }
             } else if !self.loading {
                 ui.colored_label(egui::Color32::GRAY, "No Parquet file loaded. Please use M-x emacs-parquet-explorer-open to view a file.");
             }

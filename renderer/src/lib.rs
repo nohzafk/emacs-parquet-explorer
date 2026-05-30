@@ -141,8 +141,8 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         compact_widths.push(compact_width);
         
         // Calculate expand width (maximum of header length and data cell lengths)
-        let max_expand_len = col_name_len.max(max_cell_len).min(35);
-        let expand_width = (max_expand_len as f32 * 8.0).clamp(80.0, 320.0);
+        let max_expand_len = col_name_len.max(max_cell_len).min(80);
+        let expand_width = (max_expand_len as f32 * 8.0).clamp(80.0, 640.0);
         expand_widths.push(expand_width);
     }
 
@@ -327,6 +327,28 @@ impl EguiEmacsApp for ExplorerApp {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.view_mode, ViewMode::Data, "🗃 Data View");
                     ui.selectable_value(&mut self.view_mode, ViewMode::Schema, "📋 Schema & Metadata");
+
+                    if self.view_mode == ViewMode::Data {
+                        ui.add_space(20.0);
+                        ui.collapsing("📐 Column Visibility & Pruning", |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for col in &table.columns {
+                                    let is_visible = !self.hidden_columns.contains(col);
+                                    let mut temp_visible = is_visible;
+                                    if ui.checkbox(&mut temp_visible, col).changed() {
+                                        if temp_visible {
+                                            self.hidden_columns.remove(col);
+                                        } else {
+                                            // Safety: at least 1 column must stay visible
+                                            if self.hidden_columns.len() < table.columns.len() - 1 {
+                                                self.hidden_columns.insert(col.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                    }
                 });
                 ui.add_space(4.0);
 
@@ -402,24 +424,17 @@ impl EguiEmacsApp for ExplorerApp {
                             ui.checkbox(&mut self.expand_mode, "↔ Expand Columns");
 
                             ui.add_space(16.0);
-                            ui.collapsing("📐 Column Visibility & Pruning", |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    for col in &table.columns {
-                                        let is_visible = !self.hidden_columns.contains(col);
-                                        let mut temp_visible = is_visible;
-                                        if ui.checkbox(&mut temp_visible, col).changed() {
-                                            if temp_visible {
-                                                self.hidden_columns.remove(col);
-                                            } else {
-                                                // Safety: at least 1 column must stay visible
-                                                if self.hidden_columns.len() < table.columns.len() - 1 {
-                                                    self.hidden_columns.insert(col.clone());
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                            });
+                            if ui.button("📥 Export CSV").clicked() {
+                                // Post export event with current file path
+                                emacs_egui_sdk::emacs_post_message(
+                                    "export-csv",
+                                    serde_json::json!({
+                                        "filepath": self.filepath.clone()
+                                    })
+                                );
+                            }
+
+                            ui.add_space(16.0);
                         });
 
                         ui.separator();
@@ -441,14 +456,26 @@ impl EguiEmacsApp for ExplorerApp {
                                         for (col_idx, col) in table.columns.iter().enumerate() {
                                             if !self.hidden_columns.contains(col) {
                                                 let col_width = column_widths[col_idx];
-                                                ui.horizontal(|ui| {
-                                                    ui.set_width(col_width);
-                                                    ui.add_space(6.0); // left padding matching selectable label
-                                                    ui.add_sized(
-                                                        [col_width - 12.0, 20.0],
-                                                        egui::Label::new(egui::RichText::new(col).heading()).truncate()
-                                                    );
-                                                });
+                                                // Conditionally truncate based on expand mode
+                                                let display_name = if self.expand_mode {
+                                                    if col.len() > 80 {
+                                                        format!("{}...", &col[0..77])
+                                                    } else {
+                                                        col.clone()
+                                                    }
+                                                } else {
+                                                    let max_chars = ((col_width - 8.0) / 7.5) as usize;
+                                                    if col.len() > max_chars && max_chars > 3 {
+                                                        format!("{}...", &col[0..max_chars - 3])
+                                                    } else {
+                                                        col.clone()
+                                                    }
+                                                };
+
+                                                ui.add_sized(
+                                                    [col_width, 22.0],
+                                                    egui::Label::new(egui::RichText::new(display_name).heading())
+                                                ).on_hover_text(format!("Column: {}", col));
                                             }
                                         }
                                         ui.end_row();

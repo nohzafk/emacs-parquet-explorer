@@ -671,6 +671,7 @@ dependencies = [
  "console_error_panic_hook",
  "eframe",
  "egui",
+ "js-sys",
  "lazy_static",
  "serde",
  "serde_json",

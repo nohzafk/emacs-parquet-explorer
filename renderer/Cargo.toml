@@ -10,6 +10,10 @@ crate-type = ["cdylib", "rlib"]
 name = "generate_sample"
 path = "src/bin/generate_sample.rs"
 
+[[bin]]
+name = "parquet_to_csv"
+path = "src/bin/parquet_to_csv.rs"
+
 [dependencies]
 emacs-egui-sdk = { path = "../../emacs-egui/sdk" }
 parquet = { version = "53.0", default-features = false, features = ["arrow", "snap", "flate2"] }

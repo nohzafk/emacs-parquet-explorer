@@ -159,6 +159,7 @@ pub struct ExplorerApp {
     selected_cell: Option<(usize, usize)>,
     page_offset: usize,
     page_size: usize,
+    custom_page_size_str: String,
     view_mode: ViewMode,
 }
 
@@ -174,7 +175,8 @@ impl ExplorerApp {
             search_query: String::new(),
             selected_cell: None,
             page_offset: 0,
-            page_size: 100,
+            page_size: 50,
+            custom_page_size_str: String::new(),
             view_mode: ViewMode::Data,
         }
     }
@@ -329,20 +331,28 @@ impl EguiEmacsApp for ExplorerApp {
 
                             ui.add_space(20.0);
                             ui.label("Page Size:");
-                            for size in [100, 500, 1000] {
+                            for size in [50, 100, 500, 1000] {
                                 if ui.selectable_label(self.page_size == size, format!("{}", size)).clicked() {
                                     self.page_size = size;
                                     self.page_offset = 0; // reset
+                                    self.custom_page_size_str.clear();
                                 }
                             }
 
                             ui.add_space(8.0);
                             ui.label("Custom:");
-                            let mut temp_size = self.page_size;
-                            let resp = ui.add(egui::DragValue::new(&mut temp_size).range(1..=10000).speed(5.0));
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.custom_page_size_str)
+                                    .desired_width(55.0)
+                                    .hint_text("e.g. 200")
+                            );
                             if resp.changed() {
-                                self.page_size = temp_size;
-                                self.page_offset = 0; // reset
+                                if let Ok(val) = self.custom_page_size_str.trim().parse::<usize>() {
+                                    if val > 0 && val <= 100000 {
+                                        self.page_size = val;
+                                        self.page_offset = 0; // reset
+                                    }
+                                }
                             }
                         });
 

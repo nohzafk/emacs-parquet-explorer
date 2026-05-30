@@ -38,6 +38,7 @@ pub struct ParquetTable {
     pub rows: Vec<Vec<String>>,
     pub schema: Vec<SchemaField>,
     pub stats: FileStats,
+    pub column_widths: Vec<f32>,
 }
 
 fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
@@ -102,7 +103,7 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         compression_codecs,
     };
 
-    // 2. Read Rows (cap at 10,000 for high-performance virtual rendering inside WASM)
+    // 2. Read Rows (cap at 100,000 for high-performance virtual rendering inside WASM)
     let mut rows = Vec::new();
     let row_iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
 
@@ -120,7 +121,31 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         count += 1;
     }
 
-    Ok(ParquetTable { columns, rows, schema, stats })
+    // 3. Compute Column Widths dynamically
+    let mut column_widths = Vec::new();
+    for col_idx in 0..columns.len() {
+        let col_name_len = columns[col_idx].len();
+        let mut max_len = col_name_len;
+        // Sample first 200 rows to determine layout widths accurately and instantly
+        let check_rows = rows.len().min(200);
+        for row in rows.iter().take(check_rows) {
+            if col_idx < row.len() {
+                max_len = max_len.max(row[col_idx].len());
+            }
+        }
+        // Limit max character size so single massive strings don't cause absurd column sizing
+        let max_len = max_len.min(35);
+        let width = (max_len as f32 * 8.0).clamp(80.0, 320.0);
+        column_widths.push(width);
+    }
+
+    Ok(ParquetTable {
+        columns,
+        rows,
+        schema,
+        stats,
+        column_widths,
+    })
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, JsValue> {
@@ -390,18 +415,20 @@ impl EguiEmacsApp for ExplorerApp {
                         // Outer scroll area: Horizontal only (synchronizes header + data columns horizontally)
                         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                             ui.vertical(|ui| {
-                                // Sticky Header Grid with uniform column width sizing for perfect alignment
-                                let col_width = 160.0;
+                                // Sticky Header Grid with dynamic column widths
                                 egui::Grid::new("header_grid")
-                                    .min_col_width(col_width)
                                     .spacing(egui::vec2(12.0, 4.0))
                                     .show(ui, |ui| {
-                                        for col in &table.columns {
+                                        for (col_idx, col) in table.columns.iter().enumerate() {
                                             if !self.hidden_columns.contains(col) {
-                                                ui.add_sized(
-                                                    [col_width, 24.0],
-                                                    egui::Label::new(egui::RichText::new(col).heading())
-                                                );
+                                                let col_width = table.column_widths[col_idx];
+                                                // Left-align header text and add padding to match SelectableLabel
+                                                ui.allocate_ui(egui::vec2(col_width, 24.0), |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.add_space(6.0);
+                                                        ui.heading(col);
+                                                    });
+                                                });
                                             }
                                         }
                                         ui.end_row();
@@ -420,7 +447,6 @@ impl EguiEmacsApp for ExplorerApp {
                                         egui::Grid::new("rows_grid")
                                             .striped(true)
                                             .min_row_height(row_height)
-                                            .min_col_width(col_width)
                                             .spacing(egui::vec2(12.0, 4.0))
                                             .show(ui, |ui| {
                                                 // Draw only the visible rows in current range
@@ -441,6 +467,7 @@ impl EguiEmacsApp for ExplorerApp {
                                                             cell.clone()
                                                         };
 
+                                                        let col_width = table.column_widths[col_idx];
                                                         let resp = ui.add_sized(
                                                             [col_width, row_height],
                                                             egui::SelectableLabel::new(is_selected, cell_text)

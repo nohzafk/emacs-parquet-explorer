@@ -372,7 +372,12 @@ impl EguiEmacsApp for ExplorerApp {
                         }
 
                         ui.add_space(20.0);
-                        let text_f = if self.show_filters_panel { "🔍 Predicate Filters ▲" } else { "🔍 Predicate Filters ▼" };
+                        let text_f = if self.filters.is_empty() {
+                            if self.show_filters_panel { "🔍 Predicate Filters ▲" } else { "🔍 Predicate Filters ▼" }.to_string()
+                        } else {
+                            let dir = if self.show_filters_panel { "▲" } else { "▼" };
+                            format!("🔍 Predicate Filters ({} active) 🟢 {}", self.filters.len(), dir)
+                        };
                         if ui.selectable_label(self.show_filters_panel, text_f).clicked() {
                             self.show_filters_panel = !self.show_filters_panel;
                         }
@@ -386,10 +391,6 @@ impl EguiEmacsApp for ExplorerApp {
                             .fill(ui.visuals().extreme_bg_color)
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.heading("📐 Column Visibility & Pruning");
-                                    });
-                                    ui.add_space(6.0);
                                     ui.horizontal_wrapped(|ui| {
                                         for col in &table.columns {
                                             let is_visible = !self.hidden_columns.contains(col);
@@ -416,8 +417,6 @@ impl EguiEmacsApp for ExplorerApp {
                             .fill(ui.visuals().extreme_bg_color)
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
-                                    ui.heading("🔍 Predicate Filters");
-                                    ui.add_space(6.0);
 
                                     // 1. Active Filters Badges list (wrapped onto multiple lines cleanly!)
                                     if !self.filters.is_empty() {
@@ -508,18 +507,6 @@ impl EguiEmacsApp for ExplorerApp {
 
                 match self.view_mode {
                     ViewMode::Data => {
-                        // Statistics & Filters
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
-                            ui.add_space(20.0);
-                            ui.label("Search:");
-                            if ui.text_edit_singleline(&mut self.search_query).changed() {
-                                self.page_offset = 0; // reset paging
-                            }
-                        });
-
-
-
                         // Filter row indices matching search AND active column-specific filters
                         let filtered_rows: Vec<usize> = if self.search_query.is_empty() && self.filters.is_empty() {
                             (0..table.rows.len()).collect()
@@ -588,8 +575,31 @@ impl EguiEmacsApp for ExplorerApp {
                                 .collect()
                         };
 
-                        // Paging Control
                         let total_filtered = filtered_rows.len();
+
+                        // Statistics & Filters
+                        ui.horizontal(|ui| {
+                            if self.filters.is_empty() && self.search_query.is_empty() {
+                                ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(230, 140, 10),
+                                    format!(
+                                        "Columns: {}  |  Rows: {} (filtered to {}) ⚠️ Filters Active",
+                                        table.columns.len(),
+                                        table.rows.len(),
+                                        total_filtered
+                                    )
+                                );
+                            }
+                            ui.add_space(20.0);
+                            ui.label("Search:");
+                            if ui.text_edit_singleline(&mut self.search_query).changed() {
+                                self.page_offset = 0; // reset paging
+                            }
+                        });
+
+                        // Paging Control
                         let start_idx = self.page_offset;
                         let end_idx = (start_idx + self.page_size).min(total_filtered);
 

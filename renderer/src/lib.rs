@@ -441,19 +441,13 @@ impl EguiEmacsApp for ExplorerApp {
                                         for (col_idx, col) in table.columns.iter().enumerate() {
                                             if !self.hidden_columns.contains(col) {
                                                 let col_width = column_widths[col_idx];
-                                                // Allocate exact size to guarantee the grid column takes up exactly `col_width` pixels
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    egui::vec2(col_width, 24.0),
-                                                    egui::Sense::hover()
-                                                );
-                                                ui.allocate_ui_at_rect(rect, |ui| {
-                                                    ui.horizontal(|ui| {
-                                                        ui.add_space(6.0); // left padding matching selectable label
-                                                        ui.add_sized(
-                                                            [col_width - 12.0, 20.0],
-                                                            egui::Label::new(egui::RichText::new(col).heading()).truncate()
-                                                        );
-                                                    });
+                                                ui.horizontal(|ui| {
+                                                    ui.set_width(col_width);
+                                                    ui.add_space(6.0); // left padding matching selectable label
+                                                    ui.add_sized(
+                                                        [col_width - 12.0, 20.0],
+                                                        egui::Label::new(egui::RichText::new(col).heading()).truncate()
+                                                    );
                                                 });
                                             }
                                         }

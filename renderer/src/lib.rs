@@ -376,7 +376,7 @@ impl EguiEmacsApp for ExplorerApp {
                             if self.show_filters_panel { "🔍 Predicate Filters ▲" } else { "🔍 Predicate Filters ▼" }.to_string()
                         } else {
                             let dir = if self.show_filters_panel { "▲" } else { "▼" };
-                            format!("🔍 Predicate Filters ({} active) 🟢 {}", self.filters.len(), dir)
+                            format!("🔍 Predicate Filters ({} active) {}", self.filters.len(), dir)
                         };
                         if ui.selectable_label(self.show_filters_panel, text_f).clicked() {
                             self.show_filters_panel = !self.show_filters_panel;
@@ -417,7 +417,7 @@ impl EguiEmacsApp for ExplorerApp {
                             .fill(ui.visuals().extreme_bg_color)
                             .show(ui, |ui| {
                                 ui.vertical(|ui| {
-
+ 
                                     // 1. Active Filters Badges list (wrapped onto multiple lines cleanly!)
                                     if !self.filters.is_empty() {
                                         ui.horizontal_wrapped(|ui| {
@@ -425,7 +425,7 @@ impl EguiEmacsApp for ExplorerApp {
                                             let mut to_remove = None;
                                             for (idx, filter) in self.filters.iter().enumerate() {
                                                 let text = format!("{} {} \"{}\"  ❌", filter.column, filter.operator, filter.value);
-                                                let btn = egui::Button::new(text)
+                                                let btn = egui::Button::new(egui::RichText::new(text).color(egui::Color32::WHITE))
                                                     .fill(egui::Color32::from_rgb(45, 55, 75))
                                                     .rounding(4.0);
                                                 if ui.add(btn).clicked() {
@@ -584,7 +584,7 @@ impl EguiEmacsApp for ExplorerApp {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(230, 140, 10),
                                     format!(
-                                        "Columns: {}  |  Rows: {} (filtered to {}) ⚠️ Filters Active",
+                                        "Columns: {}  |  Rows: {} (filtered to {}) [Filters Active]",
                                         table.columns.len(),
                                         table.rows.len(),
                                         total_filtered

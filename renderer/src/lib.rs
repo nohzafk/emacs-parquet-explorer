@@ -207,6 +207,8 @@ pub struct ExplorerApp {
     filter_col: String,
     filter_op: String,
     filter_val: String,
+    show_pruning_panel: bool,
+    show_filters_panel: bool,
 }
 
 impl ExplorerApp {
@@ -230,6 +232,8 @@ impl ExplorerApp {
             filter_col: String::new(),
             filter_op: "contains".to_string(),
             filter_val: String::new(),
+            show_pruning_panel: false,
+            show_filters_panel: false,
         }
     }
 }
@@ -323,6 +327,7 @@ impl EguiEmacsApp for ExplorerApp {
                                     if !self.filters.contains(&filter) {
                                         self.filters.push(filter);
                                         self.page_offset = 0;
+                                        self.show_filters_panel = true;
                                     }
                                 }
                             });
@@ -361,113 +366,144 @@ impl EguiEmacsApp for ExplorerApp {
 
                     if self.view_mode == ViewMode::Data {
                         ui.add_space(20.0);
-                        ui.collapsing("📐 Column Visibility & Pruning", |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for col in &table.columns {
-                                    let is_visible = !self.hidden_columns.contains(col);
-                                    let mut temp_visible = is_visible;
-                                    if ui.checkbox(&mut temp_visible, col).changed() {
-                                        if temp_visible {
-                                            self.hidden_columns.remove(col);
-                                        } else {
-                                            // Safety: at least 1 column must stay visible
-                                            if self.hidden_columns.len() < table.columns.len() - 1 {
-                                                self.hidden_columns.insert(col.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        });
-
-                        if self.filter_col.is_empty() && !table.columns.is_empty() {
-                            self.filter_col = table.columns[0].clone();
+                        let text = if self.show_pruning_panel { "📐 Column Visibility & Pruning ▲" } else { "📐 Column Visibility & Pruning ▼" };
+                        if ui.selectable_label(self.show_pruning_panel, text).clicked() {
+                            self.show_pruning_panel = !self.show_pruning_panel;
                         }
 
                         ui.add_space(20.0);
-                        ui.collapsing("🔍 Predicate Filters", |ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
-                            
-                            // 1. Active Filters Badges list
-                            if !self.filters.is_empty() {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(egui::RichText::new("Active Filters:").strong());
-                                    let mut to_remove = None;
-                                    for (idx, filter) in self.filters.iter().enumerate() {
-                                        let text = format!("{} {} \"{}\"", filter.column, filter.operator, filter.value);
-                                        ui.scope(|ui| {
-                                            ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 55, 75);
-                                            ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 75, 100);
-                                            if ui.button(format!("{}  ❌", text)).clicked() {
-                                                to_remove = Some(idx);
-                                            }
-                                        });
-                                    }
-                                    if let Some(idx) = to_remove {
-                                        self.filters.remove(idx);
-                                        self.page_offset = 0; // reset paging
-                                    }
-                                    
-                                    ui.add_space(8.0);
-                                    if ui.button("🗑 Clear All").clicked() {
-                                        self.filters.clear();
-                                        self.page_offset = 0;
-                                    }
-                                });
-                                ui.separator();
-                            }
-
-                            // 2. Manual filter form
-                            ui.horizontal(|ui| {
-                                ui.label("Column:");
-                                egui::ComboBox::from_id_source("filter_column_select")
-                                    .selected_text(&self.filter_col)
-                                    .width(140.0)
-                                    .show_ui(ui, |ui| {
-                                        for col in &table.columns {
-                                            ui.selectable_value(&mut self.filter_col, col.clone(), col);
-                                        }
-                                    });
-
-                                ui.add_space(8.0);
-                                ui.label("Operator:");
-                                egui::ComboBox::from_id_source("filter_operator_select")
-                                    .selected_text(&self.filter_op)
-                                    .width(90.0)
-                                    .show_ui(ui, |ui| {
-                                        for op in ["contains", "=", ">", "<", ">=", "<="] {
-                                            ui.selectable_value(&mut self.filter_op, op.to_string(), op);
-                                        }
-                                    });
-
-                                ui.add_space(8.0);
-                                ui.label("Value:");
-                                let val_resp = ui.text_edit_singleline(&mut self.filter_val);
-
-                                ui.add_space(8.0);
-                                let mut add_filter = ui.button("➕ Add Filter").clicked();
-                                if val_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                    add_filter = true;
-                                }
-
-                                if add_filter {
-                                    if !self.filter_val.trim().is_empty() {
-                                        let filter = ColumnFilter {
-                                            column: self.filter_col.clone(),
-                                            operator: self.filter_op.clone(),
-                                            value: self.filter_val.trim().to_string(),
-                                        };
-                                        if !self.filters.contains(&filter) {
-                                            self.filters.push(filter);
-                                            self.page_offset = 0;
-                                            self.filter_val.clear();
-                                        }
-                                    }
-                                }
-                            });
-                        });
+                        let text_f = if self.show_filters_panel { "🔍 Predicate Filters ▲" } else { "🔍 Predicate Filters ▼" };
+                        if ui.selectable_label(self.show_filters_panel, text_f).clicked() {
+                            self.show_filters_panel = !self.show_filters_panel;
+                        }
                     }
                 });
+
+                if self.view_mode == ViewMode::Data {
+                    if self.show_pruning_panel {
+                        ui.add_space(4.0);
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().extreme_bg_color)
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.heading("📐 Column Visibility & Pruning");
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        for col in &table.columns {
+                                            let is_visible = !self.hidden_columns.contains(col);
+                                            let mut temp_visible = is_visible;
+                                            if ui.checkbox(&mut temp_visible, col).changed() {
+                                                if temp_visible {
+                                                    self.hidden_columns.remove(col);
+                                                } else {
+                                                    // Safety: at least 1 column must stay visible
+                                                    if self.hidden_columns.len() < table.columns.len() - 1 {
+                                                        self.hidden_columns.insert(col.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                    }
+
+                    if self.show_filters_panel {
+                        ui.add_space(4.0);
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().extreme_bg_color)
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.heading("🔍 Predicate Filters");
+                                    ui.add_space(6.0);
+
+                                    // 1. Active Filters Badges list (wrapped onto multiple lines cleanly!)
+                                    if !self.filters.is_empty() {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(egui::RichText::new("Active Filters:").strong());
+                                            let mut to_remove = None;
+                                            for (idx, filter) in self.filters.iter().enumerate() {
+                                                let text = format!("{} {} \"{}\"", filter.column, filter.operator, filter.value);
+                                                ui.scope(|ui| {
+                                                    ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 55, 75);
+                                                    ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 75, 100);
+                                                    if ui.button(format!("{}  ❌", text)).clicked() {
+                                                        to_remove = Some(idx);
+                                                    }
+                                                });
+                                            }
+                                            if let Some(idx) = to_remove {
+                                                self.filters.remove(idx);
+                                                self.page_offset = 0; // reset paging
+                                            }
+                                            
+                                            ui.add_space(8.0);
+                                            if ui.button("🗑 Clear All").clicked() {
+                                                self.filters.clear();
+                                                self.page_offset = 0;
+                                            }
+                                        });
+                                        ui.separator();
+                                    }
+
+                                    if self.filter_col.is_empty() && !table.columns.is_empty() {
+                                        self.filter_col = table.columns[0].clone();
+                                    }
+
+                                    // 2. Manual filter form
+                                    ui.horizontal(|ui| {
+                                        ui.label("Column:");
+                                        egui::ComboBox::from_id_source("filter_column_select")
+                                            .selected_text(&self.filter_col)
+                                            .width(140.0)
+                                            .show_ui(ui, |ui| {
+                                                for col in &table.columns {
+                                                    ui.selectable_value(&mut self.filter_col, col.clone(), col);
+                                                }
+                                            });
+
+                                        ui.add_space(8.0);
+                                        ui.label("Operator:");
+                                        egui::ComboBox::from_id_source("filter_operator_select")
+                                            .selected_text(&self.filter_op)
+                                            .width(90.0)
+                                            .show_ui(ui, |ui| {
+                                                for op in ["contains", "=", ">", "<", ">=", "<="] {
+                                                    ui.selectable_value(&mut self.filter_op, op.to_string(), op);
+                                                }
+                                            });
+
+                                        ui.add_space(8.0);
+                                        ui.label("Value:");
+                                        let val_resp = ui.text_edit_singleline(&mut self.filter_val);
+
+                                        ui.add_space(8.0);
+                                        let mut add_filter = ui.button("➕ Add Filter").clicked();
+                                        if val_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                            add_filter = true;
+                                        }
+
+                                        if add_filter {
+                                            if !self.filter_val.trim().is_empty() {
+                                                let filter = ColumnFilter {
+                                                    column: self.filter_col.clone(),
+                                                    operator: self.filter_op.clone(),
+                                                    value: self.filter_val.trim().to_string(),
+                                                };
+                                                if !self.filters.contains(&filter) {
+                                                    self.filters.push(filter);
+                                                    self.page_offset = 0;
+                                                    self.filter_val.clear();
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                    }
+                }
                 ui.add_space(4.0);
 
                 match self.view_mode {

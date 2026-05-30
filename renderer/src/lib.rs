@@ -160,6 +160,7 @@ pub struct ExplorerApp {
     page_offset: usize,
     page_size: usize,
     custom_page_size_str: String,
+    hidden_columns: std::collections::HashSet<String>,
     view_mode: ViewMode,
 }
 
@@ -177,6 +178,7 @@ impl ExplorerApp {
             page_offset: 0,
             page_size: 50,
             custom_page_size_str: String::new(),
+            hidden_columns: std::collections::HashSet::new(),
             view_mode: ViewMode::Data,
         }
     }
@@ -303,6 +305,27 @@ impl EguiEmacsApp for ExplorerApp {
                             ui.text_edit_singleline(&mut self.search_query);
                         });
 
+                        // Column visibility list checkbox panel
+                        ui.collapsing("📐 Column Visibility & Pruning", |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for col in &table.columns {
+                                    let is_visible = !self.hidden_columns.contains(col);
+                                    let mut temp_visible = is_visible;
+                                    if ui.checkbox(&mut temp_visible, col).changed() {
+                                        if temp_visible {
+                                            self.hidden_columns.remove(col);
+                                        } else {
+                                            // Safety: at least 1 column must stay visible
+                                            if self.hidden_columns.len() < table.columns.len() - 1 {
+                                                self.hidden_columns.insert(col.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                        ui.add_space(2.0);
+
                         // Filter row indices matching search
                         let filtered_rows: Vec<usize> = if self.search_query.is_empty() {
                             (0..table.rows.len()).collect()
@@ -368,7 +391,9 @@ impl EguiEmacsApp for ExplorerApp {
                                     .spacing(egui::vec2(12.0, 4.0))
                                     .show(ui, |ui| {
                                         for col in &table.columns {
-                                            ui.heading(col);
+                                            if !self.hidden_columns.contains(col) {
+                                                ui.heading(col);
+                                            }
                                         }
                                         ui.end_row();
                                     });
@@ -394,6 +419,10 @@ impl EguiEmacsApp for ExplorerApp {
                                                     let row_idx = filtered_rows[start_idx + row_offset];
                                                     let actual_row = &table.rows[row_idx];
                                                     for (col_idx, cell) in actual_row.iter().enumerate() {
+                                                        let col_name = &table.columns[col_idx];
+                                                        if self.hidden_columns.contains(col_name) {
+                                                            continue;
+                                                        }
                                                         let is_selected = self.selected_cell == Some((row_idx, col_idx));
                                                         
                                                         // Cell label button

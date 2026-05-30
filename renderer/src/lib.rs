@@ -424,14 +424,13 @@ impl EguiEmacsApp for ExplorerApp {
                                             ui.label(egui::RichText::new("Active Filters:").strong());
                                             let mut to_remove = None;
                                             for (idx, filter) in self.filters.iter().enumerate() {
-                                                let text = format!("{} {} \"{}\"", filter.column, filter.operator, filter.value);
-                                                ui.scope(|ui| {
-                                                    ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 55, 75);
-                                                    ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 75, 100);
-                                                    if ui.button(format!("{}  ❌", text)).clicked() {
-                                                        to_remove = Some(idx);
-                                                    }
-                                                });
+                                                let text = format!("{} {} \"{}\"  ❌", filter.column, filter.operator, filter.value);
+                                                let btn = egui::Button::new(text)
+                                                    .fill(egui::Color32::from_rgb(45, 55, 75))
+                                                    .rounding(4.0);
+                                                if ui.add(btn).clicked() {
+                                                    to_remove = Some(idx);
+                                                }
                                             }
                                             if let Some(idx) = to_remove {
                                                 self.filters.remove(idx);

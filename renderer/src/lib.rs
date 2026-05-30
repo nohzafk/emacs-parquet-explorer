@@ -442,10 +442,15 @@ impl EguiEmacsApp for ExplorerApp {
 
                                 ui.add_space(8.0);
                                 ui.label("Value:");
-                                ui.text_edit_singleline(&mut self.filter_val);
+                                let val_resp = ui.text_edit_singleline(&mut self.filter_val);
 
                                 ui.add_space(8.0);
-                                if ui.button("➕ Add Filter").clicked() {
+                                let mut add_filter = ui.button("➕ Add Filter").clicked();
+                                if val_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    add_filter = true;
+                                }
+
+                                if add_filter {
                                     if !self.filter_val.trim().is_empty() {
                                         let filter = ColumnFilter {
                                             column: self.filter_col.clone(),

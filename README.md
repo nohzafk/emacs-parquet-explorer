@@ -62,6 +62,21 @@ And select any local `.parquet` file on your filesystem.
 
 ---
 
+## Feature Development Roadmap
+
+To provide complete visibility and track expansion goals, here is our sequenced step-by-step roadmap:
+
+| Priority | Feature | Status | Description |
+| :--- | :--- | :--- | :--- |
+| **1** | **Schema & Metadata Inspection** | **[x] Completed** | Side-by-side dashboard showing physical stats (compression, row groups) and schema type discovery. |
+| **2** | **Performance Polish (Virtual Scrolling)** | **[x] Completed** | Renders up to 100,000+ rows instantly using egui virtual scrolling to prevent memory spikes. |
+| **3** | **Column Pruning Toggle** | **[x] Completed** | Collapsing checklist panel to dynamically show or hide columns in the grid. |
+| **4** | **Format Interoperability (CSV Export)** | **[x] Completed** | Memory-efficient asynchronous loopback background streaming export of datasets directly to CSV. |
+| **5** | **Predicate Pushdown & Cell Filtering** | **[x] Completed** | Cell quick-filtering and column-specific predicate pushdowns to isolate anomalies instantly. |
+| **6** | **In-App SQL Execution** | **[ ] Planned** | An ad-hoc SQL query bar (`WHERE`, `GROUP BY`, `ORDER BY`) running locally on the loaded dataset. |
+
+---
+
 ## Testing with Sample Data
 
 We provide a pre-compiled native generator inside the project. To generate a sample 5-row Parquet file (`test.parquet`):

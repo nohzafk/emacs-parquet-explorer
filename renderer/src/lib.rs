@@ -15,6 +15,13 @@ pub struct ExplorerState {
     pub filepath: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnFilter {
+    pub column: String,
+    pub operator: String, // "contains", "=", ">", "<", ">=", "<="
+    pub value: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SchemaField {
     pub name: String,
@@ -196,6 +203,10 @@ pub struct ExplorerApp {
     hidden_columns: std::collections::HashSet<String>,
     expand_mode: bool,
     view_mode: ViewMode,
+    filters: Vec<ColumnFilter>,
+    filter_col: String,
+    filter_op: String,
+    filter_val: String,
 }
 
 impl ExplorerApp {
@@ -215,6 +226,10 @@ impl ExplorerApp {
             hidden_columns: std::collections::HashSet::new(),
             expand_mode: false,
             view_mode: ViewMode::Data,
+            filters: Vec::new(),
+            filter_col: String::new(),
+            filter_op: "contains".to_string(),
+            filter_val: String::new(),
         }
     }
 }
@@ -284,6 +299,9 @@ impl EguiEmacsApp for ExplorerApp {
         if self.view_mode == ViewMode::Data {
             if let Some(ref table) = self.parquet_table {
                 if let Some((row, col)) = self.selected_cell {
+                    let cell_value = table.rows[row][col].clone();
+                    let col_name = table.columns[col].clone();
+                    
                     egui::TopBottomPanel::bottom("details_panel")
                         .resizable(true)
                         .default_height(90.0)
@@ -293,10 +311,23 @@ impl EguiEmacsApp for ExplorerApp {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.heading("🔍 Selected Cell Details");
-                                ui.label(egui::RichText::new(format!("Column: {}", table.columns[col])).weak());
+                                ui.label(egui::RichText::new(format!("Column: {}", col_name)).weak());
+                                
+                                ui.add_space(20.0);
+                                if ui.button("🔍 Filter by selection").clicked() {
+                                    let filter = ColumnFilter {
+                                        column: col_name.clone(),
+                                        operator: "=".to_string(),
+                                        value: cell_value.clone(),
+                                    };
+                                    if !self.filters.contains(&filter) {
+                                        self.filters.push(filter);
+                                        self.page_offset = 0;
+                                    }
+                                }
                             });
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                ui.label(&table.rows[row][col]);
+                                ui.label(&cell_value);
                             });
                         });
                 }
@@ -359,19 +390,159 @@ impl EguiEmacsApp for ExplorerApp {
                             ui.label(format!("Columns: {}  |  Rows: {}", table.columns.len(), table.rows.len()));
                             ui.add_space(20.0);
                             ui.label("Search:");
-                            ui.text_edit_singleline(&mut self.search_query);
+                            if ui.text_edit_singleline(&mut self.search_query).changed() {
+                                self.page_offset = 0; // reset paging
+                            }
+                        });
+
+                        if self.filter_col.is_empty() && !table.columns.is_empty() {
+                            self.filter_col = table.columns[0].clone();
+                        }
+
+                        // Collapsible Predicate Filters panel
+                        ui.collapsing("🔍 Predicate Filters", |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
+                            
+                            // 1. Active Filters Badges list
+                            if !self.filters.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(egui::RichText::new("Active Filters:").strong());
+                                    let mut to_remove = None;
+                                    for (idx, filter) in self.filters.iter().enumerate() {
+                                        let text = format!("{} {} \"{}\"", filter.column, filter.operator, filter.value);
+                                        ui.scope(|ui| {
+                                            ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 55, 75);
+                                            ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 75, 100);
+                                            if ui.button(format!("{}  ❌", text)).clicked() {
+                                                to_remove = Some(idx);
+                                            }
+                                        });
+                                    }
+                                    if let Some(idx) = to_remove {
+                                        self.filters.remove(idx);
+                                        self.page_offset = 0; // reset paging
+                                    }
+                                    
+                                    ui.add_space(8.0);
+                                    if ui.button("🗑 Clear All").clicked() {
+                                        self.filters.clear();
+                                        self.page_offset = 0;
+                                    }
+                                });
+                                ui.separator();
+                            }
+
+                            // 2. Manual filter form
+                            ui.horizontal(|ui| {
+                                ui.label("Column:");
+                                egui::ComboBox::from_id_source("filter_column_select")
+                                    .selected_text(&self.filter_col)
+                                    .width(140.0)
+                                    .show_ui(ui, |ui| {
+                                        for col in &table.columns {
+                                            ui.selectable_value(&mut self.filter_col, col.clone(), col);
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.label("Operator:");
+                                egui::ComboBox::from_id_source("filter_operator_select")
+                                    .selected_text(&self.filter_op)
+                                    .width(90.0)
+                                    .show_ui(ui, |ui| {
+                                        for op in ["contains", "=", ">", "<", ">=", "<="] {
+                                            ui.selectable_value(&mut self.filter_op, op.to_string(), op);
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.label("Value:");
+                                ui.text_edit_singleline(&mut self.filter_val);
+
+                                ui.add_space(8.0);
+                                if ui.button("➕ Add Filter").clicked() {
+                                    if !self.filter_val.trim().is_empty() {
+                                        let filter = ColumnFilter {
+                                            column: self.filter_col.clone(),
+                                            operator: self.filter_op.clone(),
+                                            value: self.filter_val.trim().to_string(),
+                                        };
+                                        if !self.filters.contains(&filter) {
+                                            self.filters.push(filter);
+                                            self.page_offset = 0;
+                                            self.filter_val.clear();
+                                        }
+                                    }
+                                }
+                            });
                         });
 
 
 
-                        // Filter row indices matching search
-                        let filtered_rows: Vec<usize> = if self.search_query.is_empty() {
+                        // Filter row indices matching search AND active column-specific filters
+                        let filtered_rows: Vec<usize> = if self.search_query.is_empty() && self.filters.is_empty() {
                             (0..table.rows.len()).collect()
                         } else {
                             let query = self.search_query.to_lowercase();
                             (0..table.rows.len())
                                 .filter(|&i| {
-                                    table.rows[i].iter().any(|cell| cell.to_lowercase().contains(&query))
+                                    let row = &table.rows[i];
+                                    
+                                    // 1. Global search matches (if query is present)
+                                    let global_match = if query.is_empty() {
+                                        true
+                                    } else {
+                                        row.iter().any(|cell| cell.to_lowercase().contains(&query))
+                                    };
+                                    
+                                    if !global_match {
+                                        return false;
+                                    }
+                                    
+                                    // 2. All column filters must match
+                                    for filter in &self.filters {
+                                        let col_idx = match table.columns.iter().position(|c| c == &filter.column) {
+                                            Some(idx) => idx,
+                                            None => continue,
+                                        };
+                                        if col_idx >= row.len() {
+                                            return false;
+                                        }
+                                        
+                                        let cell_val = &row[col_idx];
+                                        let f_val = &filter.value;
+                                        
+                                        // Attempt numeric comparison if both are parseable as floats
+                                        let cell_num = cell_val.trim().parse::<f64>();
+                                        let filter_num = f_val.trim().parse::<f64>();
+                                        
+                                        let match_filter = match (cell_num, filter_num) {
+                                            (Ok(c_n), Ok(f_n)) => match filter.operator.as_str() {
+                                                "=" => (c_n - f_n).abs() < 1e-9,
+                                                ">" => c_n > f_n,
+                                                "<" => c_n < f_n,
+                                                ">=" => c_n >= f_n,
+                                                "<=" => c_n <= f_n,
+                                                "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
+                                                _ => false,
+                                            },
+                                            _ => match filter.operator.as_str() {
+                                                "=" => cell_val.to_lowercase() == f_val.to_lowercase(),
+                                                "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
+                                                ">" => cell_val.to_lowercase() > f_val.to_lowercase(),
+                                                "<" => cell_val.to_lowercase() < f_val.to_lowercase(),
+                                                ">=" => cell_val.to_lowercase() >= f_val.to_lowercase(),
+                                                "<=" => cell_val.to_lowercase() <= f_val.to_lowercase(),
+                                                _ => false,
+                                            }
+                                        };
+                                        
+                                        if !match_filter {
+                                            return false;
+                                        }
+                                    }
+                                    
+                                    true
                                 })
                                 .collect()
                         };

@@ -279,13 +279,13 @@ impl EguiEmacsApp for ExplorerApp {
                     ui.spinner();
                     ui.label("Streaming binary...");
                 }
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(format!("File: {}", self.filepath)).weak());
             });
 
             if let Some(ref err) = self.error_message {
                 ui.colored_label(egui::Color32::from_rgb(198, 88, 94), format!("Error: {}", err));
             }
-
-            ui.label(egui::RichText::new(format!("File: {}", self.filepath)).weak());
 
             if let Some(ref table) = self.parquet_table {
                 // View Mode Select Tabs
@@ -305,26 +305,7 @@ impl EguiEmacsApp for ExplorerApp {
                             ui.text_edit_singleline(&mut self.search_query);
                         });
 
-                        // Column visibility list checkbox panel
-                        ui.collapsing("📐 Column Visibility & Pruning", |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for col in &table.columns {
-                                    let is_visible = !self.hidden_columns.contains(col);
-                                    let mut temp_visible = is_visible;
-                                    if ui.checkbox(&mut temp_visible, col).changed() {
-                                        if temp_visible {
-                                            self.hidden_columns.remove(col);
-                                        } else {
-                                            // Safety: at least 1 column must stay visible
-                                            if self.hidden_columns.len() < table.columns.len() - 1 {
-                                                self.hidden_columns.insert(col.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        });
-                        ui.add_space(2.0);
+
 
                         // Filter row indices matching search
                         let filtered_rows: Vec<usize> = if self.search_query.is_empty() {
@@ -377,6 +358,26 @@ impl EguiEmacsApp for ExplorerApp {
                                     }
                                 }
                             }
+
+                            ui.add_space(20.0);
+                            ui.collapsing("📐 Column Visibility & Pruning", |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for col in &table.columns {
+                                        let is_visible = !self.hidden_columns.contains(col);
+                                        let mut temp_visible = is_visible;
+                                        if ui.checkbox(&mut temp_visible, col).changed() {
+                                            if temp_visible {
+                                                self.hidden_columns.remove(col);
+                                            } else {
+                                                // Safety: at least 1 column must stay visible
+                                                if self.hidden_columns.len() < table.columns.len() - 1 {
+                                                    self.hidden_columns.insert(col.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            });
                         });
 
                         ui.separator();

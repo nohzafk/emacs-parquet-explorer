@@ -1,7 +1,7 @@
 /renderer/target/
 /renderer/pkg/
 /test.parquet
-/test.csv
+/*.csv
 /yellow_tripdata_2023-01.parquet
 .DS_Store
 

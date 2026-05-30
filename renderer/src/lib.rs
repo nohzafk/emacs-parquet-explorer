@@ -308,14 +308,25 @@ impl EguiEmacsApp for ExplorerApp {
                     
                     egui::TopBottomPanel::bottom("details_panel")
                         .resizable(false)
-                        .default_height(26.0)
+                        .default_height(36.0)
                         .show(ctx, |ui| {
+                            ui.add_space(4.0); // comfortable top margin
                             ui.horizontal(|ui| {
+                                ui.add_space(6.0); // left margin
                                 ui.label("🔍");
-                                ui.weak(&col_name);
+                                ui.weak(format!("{}:", col_name));
+
+                                // Render the cell value first so it stays on the left next to the column name
+                                let display_val = if cell_value.len() > 150 {
+                                    format!("{}...", &cell_value[0..147])
+                                } else {
+                                    cell_value.clone()
+                                };
+                                ui.label(display_val);
 
                                 // Right-aligned button
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add_space(6.0); // right margin
                                     if ui.button("🔍 Filter by selection").clicked() {
                                         let filter = ColumnFilter {
                                             column: col_name.clone(),
@@ -329,15 +340,8 @@ impl EguiEmacsApp for ExplorerApp {
                                         }
                                     }
                                 });
-
-                                // Cell value
-                                let display_val = if cell_value.len() > 150 {
-                                    format!("{}...", &cell_value[0..147])
-                                } else {
-                                    cell_value.clone()
-                                };
-                                ui.label(display_val);
                             });
+                            ui.add_space(4.0); // comfortable bottom margin
                         });
                 }
             }

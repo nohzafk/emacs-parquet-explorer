@@ -38,7 +38,8 @@ pub struct ParquetTable {
     pub rows: Vec<Vec<String>>,
     pub schema: Vec<SchemaField>,
     pub stats: FileStats,
-    pub column_widths: Vec<f32>,
+    pub compact_widths: Vec<f32>,
+    pub expand_widths: Vec<f32>,
 }
 
 fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
@@ -121,22 +122,28 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         count += 1;
     }
 
-    // 3. Compute Column Widths dynamically
-    let mut column_widths = Vec::new();
+    // 3. Compute Column Widths dynamically for both Compact and Expand modes
+    let mut compact_widths = Vec::new();
+    let mut expand_widths = Vec::new();
     for col_idx in 0..columns.len() {
         let col_name_len = columns[col_idx].len();
-        let mut max_len = col_name_len;
-        // Sample first 200 rows to determine layout widths accurately and instantly
+        
+        // Calculate compact width (data cell lengths only)
+        let mut max_cell_len = 0;
         let check_rows = rows.len().min(200);
         for row in rows.iter().take(check_rows) {
             if col_idx < row.len() {
-                max_len = max_len.max(row[col_idx].len());
+                max_cell_len = max_cell_len.max(row[col_idx].len());
             }
         }
-        // Limit max character size so single massive strings don't cause absurd column sizing
-        let max_len = max_len.min(35);
-        let width = (max_len as f32 * 8.0).clamp(80.0, 320.0);
-        column_widths.push(width);
+        let max_cell_len = max_cell_len.min(35);
+        let compact_width = (max_cell_len as f32 * 8.0).clamp(65.0, 320.0);
+        compact_widths.push(compact_width);
+        
+        // Calculate expand width (maximum of header length and data cell lengths)
+        let max_expand_len = col_name_len.max(max_cell_len).min(35);
+        let expand_width = (max_expand_len as f32 * 8.0).clamp(80.0, 320.0);
+        expand_widths.push(expand_width);
     }
 
     Ok(ParquetTable {
@@ -144,7 +151,8 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         rows,
         schema,
         stats,
-        column_widths,
+        compact_widths,
+        expand_widths,
     })
 }
 
@@ -186,6 +194,7 @@ pub struct ExplorerApp {
     page_size: usize,
     custom_page_size_str: String,
     hidden_columns: std::collections::HashSet<String>,
+    expand_mode: bool,
     view_mode: ViewMode,
 }
 
@@ -204,6 +213,7 @@ impl ExplorerApp {
             page_size: 50,
             custom_page_size_str: String::new(),
             hidden_columns: std::collections::HashSet::new(),
+            expand_mode: false,
             view_mode: ViewMode::Data,
         }
     }
@@ -389,6 +399,9 @@ impl EguiEmacsApp for ExplorerApp {
                             }
 
                             ui.add_space(20.0);
+                            ui.checkbox(&mut self.expand_mode, "↔ Expand Columns");
+
+                            ui.add_space(16.0);
                             ui.collapsing("📐 Column Visibility & Pruning", |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     for col in &table.columns {
@@ -411,7 +424,13 @@ impl EguiEmacsApp for ExplorerApp {
 
                         ui.separator();
 
-                        // 2. Data Table Grid
+                         // 2. Data Table Grid
+                        let column_widths = if self.expand_mode {
+                            &table.expand_widths
+                        } else {
+                            &table.compact_widths
+                        };
+
                         // Outer scroll area: Horizontal only (synchronizes header + data columns horizontally)
                         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                             ui.vertical(|ui| {
@@ -421,7 +440,7 @@ impl EguiEmacsApp for ExplorerApp {
                                     .show(ui, |ui| {
                                         for (col_idx, col) in table.columns.iter().enumerate() {
                                             if !self.hidden_columns.contains(col) {
-                                                let col_width = table.column_widths[col_idx];
+                                                let col_width = column_widths[col_idx];
                                                 // Left-align header text and add padding to match SelectableLabel
                                                 ui.allocate_ui(egui::vec2(col_width, 24.0), |ui| {
                                                     ui.horizontal(|ui| {
@@ -471,7 +490,7 @@ impl EguiEmacsApp for ExplorerApp {
                                                             cell.clone()
                                                         };
 
-                                                        let col_width = table.column_widths[col_idx];
+                                                        let col_width = column_widths[col_idx];
                                                         let resp = ui.add_sized(
                                                             [col_width, row_height],
                                                             egui::SelectableLabel::new(is_selected, cell_text)

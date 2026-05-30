@@ -426,7 +426,11 @@ impl EguiEmacsApp for ExplorerApp {
                                                 ui.allocate_ui(egui::vec2(col_width, 24.0), |ui| {
                                                     ui.horizontal(|ui| {
                                                         ui.add_space(6.0);
-                                                        ui.heading(col);
+                                                        // Ensure header text is left-aligned, sized exactly to fit, and truncated if column width is exceeded
+                                                        ui.add_sized(
+                                                            [col_width - 12.0, 20.0],
+                                                            egui::Label::new(egui::RichText::new(col).heading()).truncate()
+                                                        );
                                                     });
                                                 });
                                             }

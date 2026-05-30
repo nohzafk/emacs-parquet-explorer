@@ -390,14 +390,18 @@ impl EguiEmacsApp for ExplorerApp {
                         // Outer scroll area: Horizontal only (synchronizes header + data columns horizontally)
                         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                             ui.vertical(|ui| {
-                                // Sticky Header Grid
+                                // Sticky Header Grid with uniform column width sizing for perfect alignment
+                                let col_width = 160.0;
                                 egui::Grid::new("header_grid")
-                                    .min_col_width(140.0)
+                                    .min_col_width(col_width)
                                     .spacing(egui::vec2(12.0, 4.0))
                                     .show(ui, |ui| {
                                         for col in &table.columns {
                                             if !self.hidden_columns.contains(col) {
-                                                ui.heading(col);
+                                                ui.add_sized(
+                                                    [col_width, 24.0],
+                                                    egui::Label::new(egui::RichText::new(col).heading())
+                                                );
                                             }
                                         }
                                         ui.end_row();
@@ -416,7 +420,7 @@ impl EguiEmacsApp for ExplorerApp {
                                         egui::Grid::new("rows_grid")
                                             .striped(true)
                                             .min_row_height(row_height)
-                                            .min_col_width(140.0)
+                                            .min_col_width(col_width)
                                             .spacing(egui::vec2(12.0, 4.0))
                                             .show(ui, |ui| {
                                                 // Draw only the visible rows in current range
@@ -437,7 +441,10 @@ impl EguiEmacsApp for ExplorerApp {
                                                             cell.clone()
                                                         };
 
-                                                        let resp = ui.selectable_label(is_selected, cell_text);
+                                                        let resp = ui.add_sized(
+                                                            [col_width, row_height],
+                                                            egui::SelectableLabel::new(is_selected, cell_text)
+                                                        );
                                                         if resp.clicked() {
                                                             self.selected_cell = Some((row_idx, col_idx));
                                                             // POST message back to Emacs host!

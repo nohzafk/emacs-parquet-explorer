@@ -4,3 +4,8 @@ setup:
 
 wasm:
     cd ui && wasm-pack build --target web --release
+
+clean:
+    cd ui && cargo clean
+    rm -rf ui/pkg
+

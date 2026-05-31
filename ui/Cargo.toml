@@ -7,10 +7,6 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "generate_sample"
-path = "src/bin/generate_sample.rs"
-
-[[bin]]
 name = "parquet_to_csv"
 path = "src/bin/parquet_to_csv.rs"
 

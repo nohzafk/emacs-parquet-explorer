@@ -120,21 +120,7 @@ And select any local `.parquet` file on your filesystem.
 
 ## 📊 Verification & Performance Benchmarking
 
-To verify that the build environment and performance optimizations are working seamlessly, you can test with both small and massive datasets:
-
-### 1. Small Sample Verification (5 Rows)
-
-Generate a basic 5-row test file using our built-in CLI generator:
-
-```sh
-cd ui && cargo run --bin generate_sample
-```
-
-This generates `test.parquet` in the project root. Open it in Emacs using `M-x emacs-parquet-explorer-open` to verify metadata inspection, schema mapping, and event handling.
-
-### 2. High-Volume Performance Benchmark (3+ Million Rows)
-
-To test the speed of virtual rendering, schema pruning, and predicate pushdowns under heavy load, download a real-world Yellow Taxi dataset (~47MB Parquet / over 3,000,000 rows):
+To verify that the build environment and performance optimizations are working seamlessly, you can test by downloading a real-world Yellow Taxi dataset (~47MB Parquet / over 3,000,000 rows):
 
 ```sh
 curl -L -o yellow_tripdata_2023-01.parquet \

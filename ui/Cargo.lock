@@ -681,22 +681,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "emacs-parquet-explorer-renderer"
+name = "emacs-parquet-explorer-ui"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "console_error_panic_hook",
  "eframe",
  "egui",
  "emacs-egui-sdk",
- "js-sys",
  "lazy_static",
  "parquet",
  "serde",
  "serde_json",
  "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

@@ -2,7 +2,10 @@ use emacs_egui_sdk::{EguiEmacsApp, ThemeColors};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
 
 lazy_static::lazy_static! {
     static ref LOADED_TABLE: Mutex<Option<Result<ParquetTable, String>>> = Mutex::new(None);
@@ -163,25 +166,6 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
     })
 }
 
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, JsValue> {
-    use wasm_bindgen::JsCast;
-    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url)).await?;
-    let resp: web_sys::Response = resp_value.dyn_into()?;
-    
-    if !resp.ok() {
-        return Err(JsValue::from_str(&format!("HTTP status {}", resp.status())));
-    }
-    
-    let array_buffer_value = wasm_bindgen_futures::JsFuture::from(resp.array_buffer()?).await?;
-    let array_buffer: js_sys::ArrayBuffer = array_buffer_value.dyn_into()?;
-    let typed_array = js_sys::Uint8Array::new(&array_buffer);
-    
-    let mut bytes = vec![0; typed_array.length() as usize];
-    typed_array.copy_to(&mut bytes);
-    Ok(bytes)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewMode {
     Data,
@@ -190,8 +174,6 @@ pub enum ViewMode {
 
 pub struct ExplorerApp {
     filepath: String,
-    session_id: String,
-    port: u16,
     parquet_table: Option<ParquetTable>,
     loading: bool,
     error_message: Option<String>,
@@ -212,11 +194,9 @@ pub struct ExplorerApp {
 }
 
 impl ExplorerApp {
-    pub fn new(session_id: String, port: u16) -> Self {
+    pub fn new() -> Self {
         Self {
             filepath: String::new(),
-            session_id,
-            port,
             parquet_table: None,
             loading: false,
             error_message: None,
@@ -253,15 +233,11 @@ impl EguiEmacsApp for ExplorerApp {
         self.selected_cell = None;
         self.page_offset = 0;
 
-        let filepath = state.filepath.clone();
-        let port = self.port;
+        let url = emacs_egui_sdk::file_url(&state.filepath);
 
         // Fetch file in async task
-        wasm_bindgen_futures::spawn_local(async move {
-            let encoded = js_sys::encode_uri_component(&filepath);
-            let url = format!("http://127.0.0.1:{}/api/file?path={}", port, encoded);
-            
-            match fetch_bytes(&url).await {
+        emacs_egui_sdk::wasm_bindgen_futures::spawn_local(async move {
+            match emacs_egui_sdk::fetch_bytes(&url).await {
                 Ok(bytes) => {
                     let parse_result = parse_parquet(bytes);
                     if let Ok(mut guard) = LOADED_TABLE.lock() {
@@ -876,23 +852,5 @@ impl EguiEmacsApp for ExplorerApp {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn start_app(canvas_id: &str) -> Result<(), JsValue> {
-    // Read session parameters from location fragment on load
-    let session_id = if let Some(win) = web_sys::window() {
-        let hash = win.location().hash().unwrap_or_default().replace("#", "");
-        let params = web_sys::UrlSearchParams::new_with_str(&hash).unwrap();
-        params.get("session").unwrap_or_else(|| "default-session".to_string())
-    } else {
-        "default-session".to_string()
-    };
-
-    let port = if let Some(win) = web_sys::window() {
-        let hash = win.location().hash().unwrap_or_default().replace("#", "");
-        let params = web_sys::UrlSearchParams::new_with_str(&hash).unwrap();
-        params.get("port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(8080)
-    } else {
-        8080
-    };
-
-    let app = ExplorerApp::new(session_id, port);
-    emacs_egui_sdk::bootstrap_app(app, canvas_id)
+    emacs_egui_sdk::launch_simple(canvas_id, ExplorerApp::new())
 }

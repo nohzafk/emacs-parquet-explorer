@@ -12,8 +12,6 @@
 
 ;;; Code:
 
-(require 'emacs-egui)
-
 (defgroup emacs-parquet-explorer nil
   "Interactive visual explorer for large Parquet files."
   :group 'tools
@@ -23,20 +21,22 @@
   (file-name-directory (or load-file-name buffer-file-name default-directory))
   "Directory containing the emacs-parquet-explorer package files.")
 
-(defun emacs-parquet-explorer--get-field (payload key)
-  "Retrieve KEY from PAYLOAD, supporting both alist and plist formats.
-KEY should be a keyword or symbol (e.g. :filepath or 'filepath)."
-  (let* ((key-str (symbol-name key))
-         (clean-key (if (string-prefix-p ":" key-str)
-                        (substring key-str 1)
-                      key-str)))
-    (if (and payload (listp (car-safe payload)))
-        ;; It's an alist!
-        (let ((sym (intern clean-key)))
-          (cdr (assoc sym payload)))
-      ;; It's a plist!
-      (let ((kw (intern (concat ":" clean-key))))
-        (plist-get payload kw)))))
+;; Auto-load bundled emacs-egui from the submodule
+(unless (featurep 'emacs-egui)
+  (add-to-list 'load-path
+               (expand-file-name "../deps/emacs-egui/lisp/"
+                                 emacs-parquet-explorer--dir)))
+(require 'emacs-egui)
+
+;; Version gate
+(when (version< emacs-egui-version "0.1.0")
+  (error "emacs-parquet-explorer requires emacs-egui >= 0.1.0, found %s"
+         emacs-egui-version))
+
+;; Register UI directory
+(emacs-egui-register-app "emacs-parquet-explorer"
+                         (expand-file-name "../ui/"
+                                           emacs-parquet-explorer--dir))
 
 ;;;###autoload
 (defun emacs-parquet-explorer-open (file)
@@ -52,9 +52,9 @@ KEY should be a keyword or symbol (e.g. :filepath or 'filepath)."
     ;; 2. Register callback for interactive cell selection
     (emacs-egui-on session "cell-selected"
                    (lambda (payload)
-                     (let ((val (emacs-parquet-explorer--get-field payload :value))
-                           (col (emacs-parquet-explorer--get-field payload :column))
-                           (row (emacs-parquet-explorer--get-field payload :row)))
+                     (let ((val (emacs-egui-get-field payload :value))
+                           (col (emacs-egui-get-field payload :column))
+                           (row (emacs-egui-get-field payload :row)))
                        (when val
                          (kill-new val)
                          (message "Copied cell [%s, %s] to clipboard: %s" row col val)))))
@@ -62,7 +62,7 @@ KEY should be a keyword or symbol (e.g. :filepath or 'filepath)."
     ;; 3. Register callback for asynchronous CSV export
     (emacs-egui-on session "export-csv"
                    (lambda (payload)
-                     (let* ((input-path (emacs-parquet-explorer--get-field payload :filepath))
+                     (let* ((input-path (emacs-egui-get-field payload :filepath))
                             (default-output (and input-path (concat (file-name-sans-extension input-path) ".csv")))
                             (output-path (and input-path (read-file-name "Export CSV to: " nil nil nil (file-name-nondirectory default-output)))))
                        (if (and input-path output-path)
@@ -87,7 +87,7 @@ KEY should be a keyword or symbol (e.g. :filepath or 'filepath)."
   "Asynchronously convert INPUT-PATH (parquet) to OUTPUT-PATH (csv) using native Rust exporter."
   (let* ((expanded-input (expand-file-name input-path))
          (expanded-output (expand-file-name output-path))
-         (manifest-path (expand-file-name "renderer/Cargo.toml" (expand-file-name "../" emacs-parquet-explorer--dir)))
+         (manifest-path (expand-file-name "ui/Cargo.toml" (expand-file-name "../" emacs-parquet-explorer--dir)))
          (buf (get-buffer-create "*Parquet Export*"))
          (proc-name "parquet-export-process"))
     (message "Exporting Parquet to CSV...")

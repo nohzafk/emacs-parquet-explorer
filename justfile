@@ -3,4 +3,4 @@ setup:
     cargo install wasm-pack
 
 wasm:
-    cd renderer && wasm-pack build --target web --release
+    cd ui && wasm-pack build --target web --release

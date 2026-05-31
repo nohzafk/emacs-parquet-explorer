@@ -35,41 +35,61 @@ Layered on top of the generic [emacs-egui](https://github.com/nohzafk/emacs-egui
 
 ## 📦 Installation
 
-### 1. Clone with submodules
+The WebAssembly UI is compiled locally — there are **no prebuilt binaries in the
+repo** — and `emacs-egui` is vendored as a git submodule (it is not on MELPA and
+is intentionally **not** a `Package-Requires` dependency; the submodule supplies
+both the Elisp framework and the Rust SDK used to build the UI). Every install
+must therefore (1) fetch submodules and (2) build the UI into `ui/pkg/`.
 
-`emacs-egui` is bundled under `emacs-egui` at the repository root (it is not on MELPA), so include submodules:
+### Option A — `use-package` with `:vc` (Emacs 30+)
 
-```sh
-git clone --recurse-submodules https://github.com/nohzafk/emacs-parquet-explorer.git
-
-# Already cloned without --recurse-submodules?
-git submodule update --init --recursive
-```
-
-### 2. Build the WebAssembly UI
-
-A [`justfile`](https://github.com/casey/just) is provided. `just setup` installs the build toolchain (the `wasm32-unknown-unknown` target and `wasm-pack`); `just wasm` compiles the UI into `ui/pkg/`:
-
-```sh
-just setup   # one-time: set up the Rust/WASM build toolchain
-just wasm    # build the WebAssembly UI
-```
-
-Or build manually: `cd ui && wasm-pack build --target web --release`.
-
-### 3. Add to your Emacs config
-
-Add **only** this package's `lisp/` directory to your `load-path` — it loads the bundled `emacs-egui` automatically:
+A single declaration clones the repo, initialises the bundled `emacs-egui`
+submodule, and compiles the UI — all at install time. It needs the Rust /
+[`wasm-pack`](https://rustwasm.github.io/wasm-pack/) toolchain present, and you
+must opt in to the build step via `package-vc-allow-build-commands`, since
+`:shell-command` runs code on install.
 
 ```elisp
-(add-to-list 'load-path "~/projects/emacs-parquet-explorer/lisp")
+;; Allow the build step for this package (Emacs ignores :shell-command by default).
+(setq package-vc-allow-build-commands '(emacs-parquet-explorer))
+
+;; package-vc does NOT fetch git submodules, so the build step initialises them
+;; (providing the emacs-egui Elisp + Rust SDK) and then compiles the UI.
+(use-package emacs-parquet-explorer
+  :vc (:url "https://github.com/nohzafk/emacs-parquet-explorer"
+       :rev :newest
+       :lisp-dir "lisp"
+       :shell-command
+       "git submodule update --init --recursive && cd ui && wasm-pack build --target web --release")
+  :bind ("C-c d p" . emacs-parquet-explorer-open))
+```
+
+After `M-x package-vc-upgrade`, rebuild the UI with `M-x package-vc-rebuild RET
+emacs-parquet-explorer`. On Emacs 29 (no `use-package` `:vc`) use Option B.
+
+### Option B — Manual clone + raw Emacs Lisp (Emacs 29.1+)
+
+```sh
+git clone --recurse-submodules https://github.com/nohzafk/emacs-parquet-explorer.git \
+  ~/src/emacs-parquet-explorer
+cd ~/src/emacs-parquet-explorer
+just setup   # one-time: wasm32-unknown-unknown target + wasm-pack
+just wasm    # build the UI into ui/pkg/
+# (already cloned shallow? git submodule update --init --recursive)
+```
+
+```elisp
+;; Only this package's lisp/ is needed -- the bundled emacs-egui is discovered
+;; automatically (or an emacs-egui already on your load-path is used instead).
+(add-to-list 'load-path "~/src/emacs-parquet-explorer/lisp")
 (load "emacs-parquet-explorer-autoloads" nil t)
 (keymap-set global-map "C-c d p" #'emacs-parquet-explorer-open)
 ```
 
-### 4. Open a Parquet file
+### Open a Parquet file
 
-Run `C-c d p` or `M-x emacs-parquet-explorer-open`, then select any local `.parquet` file.
+Run `C-c d p` or `M-x emacs-parquet-explorer-open`, then select any local
+`.parquet` file.
 
 ---
 
@@ -119,11 +139,11 @@ The UI thread and background workers are fully decoupled using a Front/Back Buff
 
 ```mermaid
 graph TD
-    A[UI Thread - egui] -- 1. Page/Filter Change --> B(Async Loader Task)
-    B -- 2. Decode Rows in Background --> C[Back Buffer: LOADED_ROWS]
-    C -- 3. Push complete page --> A
-    A -- 4. Swap: front_buffer = back_buffer --> D[Front Buffer: active_rows]
-    D -- 5. Render instantly at 60fps --> E[Screen]
+    A[UI Thread - egui] -- 1 Page/Filter Change --> B(Async Loader Task)
+    B -- 2 Decode Rows in Background --> C[Back Buffer: LOADED_ROWS]
+    C -- 3 Push complete page --> A
+    A -- 4 Swap: front_buffer = back_buffer --> D[Front Buffer: active_rows]
+    D -- 5 Render instantly at 60fps --> E[Screen]
 ```
 
 ### Key Techniques

@@ -3,7 +3,7 @@
 ;; Author: emacs-parquet-explorer
 ;; Version: 0.1.0
 ;; Keywords: convenience, tools, data, arrow, parquet
-;; Package-Requires: ((emacs "29.1") (emacs-egui "0.1.0"))
+;; Package-Requires: ((emacs "29.1"))
 
 ;;; Commentary:
 ;; An interactive, GPU-accelerated visual data browser for large Parquet files.
@@ -25,12 +25,14 @@
                              default-directory))
     "Directory containing the emacs-parquet-explorer package files.")
 
-  ;; emacs-egui is not published to MELPA; it ships as a bundled git submodule
-  ;; at the repository root.  Package managers that resolve `Package-Requires'
-  ;; may already have installed emacs-egui as its own package, in which case it
-  ;; is on `load-path' even though it has not been loaded yet (so `featurep' is
-  ;; still nil at byte-compile time).  Only when it cannot be located do we fall
-  ;; back to the bundled submodule copy, and only error if neither is present.
+  ;; emacs-egui is not published to MELPA and is intentionally NOT declared in
+  ;; `Package-Requires': this package vendors it as a git submodule at the
+  ;; repository root, which is also required to build the WASM UI (the Rust SDK
+  ;; lives there), so the submodule is the single source of truth.  If emacs-egui
+  ;; happens to be installed separately it will be on `load-path' -- but
+  ;; `featurep' can still be nil at byte-compile time, so we also check
+  ;; `locate-library'.  Only when neither is found do we fall back to the bundled
+  ;; submodule copy, erroring if even that is absent.
   (unless (or (featurep 'emacs-egui)
               (locate-library "emacs-egui"))
     (let ((egui-dir (expand-file-name "../emacs-egui/lisp/"

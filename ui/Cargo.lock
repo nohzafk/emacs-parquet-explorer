@@ -688,11 +688,13 @@ dependencies = [
  "eframe",
  "egui",
  "emacs-egui-sdk",
+ "js-sys",
  "lazy_static",
  "parquet",
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

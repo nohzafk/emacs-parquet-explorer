@@ -7,10 +7,28 @@ use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 lazy_static::lazy_static! {
     static ref LOADED_TABLE: Mutex<Option<Result<ParquetTable, String>>> = Mutex::new(None);
     static ref ASYNC_TRIGGERED: Mutex<Option<String>> = Mutex::new(None);
+    static ref LOADED_ROWS: Mutex<Option<Result<PageLoadResult, String>>> = Mutex::new(None);
+    static ref FILTER_RESULTS: Mutex<Option<Result<FilterResult, String>>> = Mutex::new(None);
 }
+
+static LATEST_FILTER_VERSION: AtomicUsize = AtomicUsize::new(0);
+
+
+pub struct PageLoadResult {
+    pub rows: Vec<Vec<String>>,
+    pub indices: Vec<usize>,
+}
+
+pub struct FilterResult {
+    pub indices: Vec<usize>,
+    pub version: usize,
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ExplorerState {
@@ -42,19 +60,99 @@ pub struct FileStats {
     pub compression_codecs: Vec<String>,
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct ParquetTable {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub bytes: bytes::Bytes,
     pub schema: Vec<SchemaField>,
     pub stats: FileStats,
     pub compact_widths: Vec<f32>,
     pub expand_widths: Vec<f32>,
 }
 
+impl Default for ParquetTable {
+    fn default() -> Self {
+        Self {
+            columns: Vec::new(),
+            bytes: bytes::Bytes::new(),
+            schema: Vec::new(),
+            stats: FileStats::default(),
+            compact_widths: Vec::new(),
+            expand_widths: Vec::new(),
+        }
+    }
+}
+
+impl ParquetTable {
+    pub fn read_rows_subset(&self, indices: &[usize]) -> Result<Vec<Vec<String>>, String> {
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let reader = SerializedFileReader::new(self.bytes.clone()).map_err(|e| e.to_string())?;
+        
+        let num_row_groups = reader.metadata().num_row_groups();
+        let mut rg_ranges = Vec::new();
+        let mut current_offset = 0;
+        for rg_idx in 0..num_row_groups {
+            let rg_rows = reader.metadata().row_group(rg_idx).num_rows() as usize;
+            rg_ranges.push(current_offset..(current_offset + rg_rows));
+            current_offset += rg_rows;
+        }
+
+        let mut sorted_req: Vec<(usize, usize)> = indices.iter().cloned().enumerate().collect();
+        sorted_req.sort_by_key(|&(_, val)| val);
+
+        let mut decoded_rows = vec![Vec::new(); indices.len()];
+
+        let mut req_idx = 0;
+        for rg_idx in 0..num_row_groups {
+            let rg_range = &rg_ranges[rg_idx];
+            
+            if req_idx >= sorted_req.len() || sorted_req[req_idx].1 >= rg_range.end {
+                continue;
+            }
+
+            let rg_reader = reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
+            let mut row_iter = rg_reader.get_row_iter(None).map_err(|e| e.to_string())?;
+            
+            let mut current_rg_row = 0;
+            while req_idx < sorted_req.len() && rg_range.contains(&sorted_req[req_idx].1) {
+                let target_global_idx = sorted_req[req_idx].1;
+                let target_rg_idx = target_global_idx - rg_range.start;
+
+                let mut skipped_all = true;
+                while current_rg_row < target_rg_idx {
+                    if row_iter.next().is_none() {
+                        skipped_all = false;
+                        break;
+                    }
+                    current_rg_row += 1;
+                }
+
+                if skipped_all {
+                    if let Some(record) = row_iter.next() {
+                        let record = record.map_err(|e| e.to_string())?;
+                        let mut row = Vec::new();
+                        for (_, field) in record.get_column_iter() {
+                            row.push(format!("{}", field));
+                        }
+                        let orig_pos = sorted_req[req_idx].0;
+                        decoded_rows[orig_pos] = row;
+                        current_rg_row += 1;
+                    }
+                }
+                req_idx += 1;
+            }
+        }
+
+        Ok(decoded_rows)
+    }
+}
+
 fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
     let bytes = bytes::Bytes::from(bytes);
-    let reader = SerializedFileReader::new(bytes).map_err(|e| e.to_string())?;
+    let reader = SerializedFileReader::new(bytes.clone()).map_err(|e| e.to_string())?;
 
     // 1. Extract Column Schema Names
     let file_metadata = reader.metadata().file_metadata();
@@ -114,22 +212,20 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         compression_codecs,
     };
 
-    // 2. Read Rows (cap at 100,000 for high-performance virtual rendering inside WASM)
-    let mut rows = Vec::new();
-    let row_iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
-
-    let mut count = 0;
-    for record in row_iter {
-        if count >= 100000 {
-            break;
+    // 2. Read first 200 rows to compute column widths dynamically
+    let mut sample_rows = Vec::new();
+    if let Ok(mut row_iter) = reader.get_row_iter(None) {
+        for _ in 0..200 {
+            if let Some(Ok(record)) = row_iter.next() {
+                let mut row = Vec::new();
+                for (_, field) in record.get_column_iter() {
+                    row.push(format!("{}", field));
+                }
+                sample_rows.push(row);
+            } else {
+                break;
+            }
         }
-        let record = record.map_err(|e| e.to_string())?;
-        let mut row = Vec::new();
-        for (_, field) in record.get_column_iter() {
-            row.push(format!("{}", field));
-        }
-        rows.push(row);
-        count += 1;
     }
 
     // 3. Compute Column Widths dynamically for both Compact and Expand modes
@@ -140,8 +236,8 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
         
         // Calculate compact width (data cell lengths only)
         let mut max_cell_len = 0;
-        let check_rows = rows.len().min(200);
-        for row in rows.iter().take(check_rows) {
+        let check_rows = sample_rows.len().min(200);
+        for row in sample_rows.iter().take(check_rows) {
             if col_idx < row.len() {
                 max_cell_len = max_cell_len.max(row[col_idx].len());
             }
@@ -158,13 +254,14 @@ fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
 
     Ok(ParquetTable {
         columns,
-        rows,
+        bytes,
         schema,
         stats,
         compact_widths,
         expand_widths,
     })
 }
+
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewMode {
@@ -191,6 +288,23 @@ pub struct ExplorerApp {
     filter_val: String,
     show_pruning_panel: bool,
     show_filters_panel: bool,
+
+    // Front Buffer for active page rows
+    active_rows: Vec<Vec<String>>,
+    // Indices currently stored in active_rows
+    active_indices: Vec<usize>,
+    // Indicator that background page load is in progress
+    rows_loading: bool,
+    
+    // Predicate search/filtering variables
+    filtered_indices: Vec<usize>,
+    filtering_in_progress: bool,
+    filter_version: usize,
+    
+    // Tracking for state changes to trigger requests
+    last_requested_indices: Vec<usize>,
+    last_search_query: String,
+    last_filters: Vec<ColumnFilter>,
 }
 
 impl ExplorerApp {
@@ -214,9 +328,55 @@ impl ExplorerApp {
             filter_val: String::new(),
             show_pruning_panel: false,
             show_filters_panel: false,
+
+            active_rows: Vec::new(),
+            active_indices: Vec::new(),
+            rows_loading: false,
+            
+            filtered_indices: Vec::new(),
+            filtering_in_progress: false,
+            filter_version: 0,
+            
+            last_requested_indices: Vec::new(),
+            last_search_query: String::new(),
+            last_filters: Vec::new(),
+        }
+    }
+
+    fn trigger_filter_update(&mut self) {
+        let Some(ref table) = self.parquet_table else { return; };
+        let new_version = self.filter_version + 1;
+        self.filter_version = new_version;
+        LATEST_FILTER_VERSION.store(new_version, Ordering::SeqCst);
+        
+        self.page_offset = 0; // reset paging
+        self.selected_cell = None; // clear selected cell
+
+        if self.search_query.is_empty() && self.filters.is_empty() {
+            self.filtered_indices = (0..table.stats.total_rows as usize).collect();
+            self.filtering_in_progress = false;
+        } else {
+            self.filtering_in_progress = true;
+            let table_cloned = table.clone();
+            let query_cloned = self.search_query.clone();
+            let filters_cloned = self.filters.clone();
+            let version = new_version;
+
+            emacs_egui_sdk::wasm_bindgen_futures::spawn_local(async move {
+                let scan_res = scan_and_filter_indices(
+                    table_cloned,
+                    query_cloned,
+                    filters_cloned,
+                    version,
+                ).await;
+                if let Ok(mut guard) = FILTER_RESULTS.lock() {
+                    *guard = Some(scan_res);
+                }
+            });
         }
     }
 }
+
 
 impl EguiEmacsApp for ExplorerApp {
     type State = ExplorerState;
@@ -266,7 +426,90 @@ impl EguiEmacsApp for ExplorerApp {
                 match res {
                     Ok(table) => {
                         self.parquet_table = Some(table);
+                        self.trigger_filter_update();
                         self.error_message = None;
+                    }
+                    Err(err) => {
+                        self.error_message = Some(err);
+                    }
+                }
+            }
+        }
+
+        if self.parquet_table.is_some() {
+            if self.search_query != self.last_search_query || self.filters != self.last_filters {
+                self.last_search_query = self.search_query.clone();
+                self.last_filters = self.filters.clone();
+                self.trigger_filter_update();
+            }
+        }
+
+        if let Ok(mut guard) = FILTER_RESULTS.lock() {
+            if let Some(res) = guard.take() {
+                match res {
+                    Ok(filter_result) => {
+                        if filter_result.version == self.filter_version {
+                            self.filtered_indices = filter_result.indices;
+                            self.filtering_in_progress = false;
+                        }
+                    }
+                    Err(err) => {
+                        if err != "Aborted" {
+                            self.error_message = Some(err);
+                            self.filtering_in_progress = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut target_indices = Vec::new();
+        if let Some(ref table) = self.parquet_table {
+            let start = self.page_offset;
+            let end = (start + self.page_size).min(self.filtered_indices.len());
+            if start < end {
+                target_indices = self.filtered_indices[start..end].to_vec();
+            }
+
+            if !target_indices.is_empty()
+                && target_indices != self.active_indices
+                && target_indices != self.last_requested_indices
+                && !self.rows_loading
+            {
+                self.rows_loading = true;
+                self.last_requested_indices = target_indices.clone();
+
+                let table_cloned = table.clone();
+                let indices_cloned = target_indices.clone();
+
+                emacs_egui_sdk::wasm_bindgen_futures::spawn_local(async move {
+                    let result = table_cloned.read_rows_subset(&indices_cloned);
+                    if let Ok(mut guard) = LOADED_ROWS.lock() {
+                        match result {
+                            Ok(rows) => {
+                                *guard = Some(Ok(PageLoadResult {
+                                    rows,
+                                    indices: indices_cloned,
+                                }));
+                            }
+                            Err(err) => {
+                                *guard = Some(Err(err));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        if let Ok(mut guard) = LOADED_ROWS.lock() {
+            if let Some(res) = guard.take() {
+                self.rows_loading = false;
+                match res {
+                    Ok(page_result) => {
+                        if page_result.indices == target_indices {
+                            self.active_rows = page_result.rows;
+                            self.active_indices = page_result.indices;
+                        }
                     }
                     Err(err) => {
                         self.error_message = Some(err);
@@ -278,9 +521,18 @@ impl EguiEmacsApp for ExplorerApp {
         // 1. Draw resizable bottom details panel first (if selection exists and in Data view)
         if self.view_mode == ViewMode::Data {
             if let Some(ref table) = self.parquet_table {
-                if let Some((row, col)) = self.selected_cell {
-                    let cell_value = table.rows[row][col].clone();
+                if let Some((row_idx, col)) = self.selected_cell {
+                    let cell_value = if let Some(local_offset) = self.active_indices.iter().position(|&idx| idx == row_idx) {
+                        if local_offset < self.active_rows.len() && col < self.active_rows[local_offset].len() {
+                            self.active_rows[local_offset][col].clone()
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        "Loading...".to_string()
+                    };
                     let col_name = table.columns[col].clone();
+
                     
                     egui::TopBottomPanel::bottom("details_panel")
                         .resizable(false)
@@ -330,9 +582,15 @@ impl EguiEmacsApp for ExplorerApp {
             // 1. Header controls
             ui.horizontal(|ui| {
                 ui.heading("📊 Parquet File Explorer");
-                if self.loading {
+                if self.loading || self.filtering_in_progress || self.rows_loading {
                     ui.spinner();
-                    ui.label("Streaming binary...");
+                    if self.loading {
+                        ui.label("Streaming binary...");
+                    } else if self.filtering_in_progress {
+                        ui.label("Filtering 3M+ rows...");
+                    } else {
+                        ui.label("Loading page...");
+                    }
                 }
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(format!("File: {}", self.filepath)).weak());
@@ -504,74 +762,7 @@ impl EguiEmacsApp for ExplorerApp {
 
                 match self.view_mode {
                     ViewMode::Data => {
-                        // Filter row indices matching search AND active column-specific filters
-                        let filtered_rows: Vec<usize> = if self.search_query.is_empty() && self.filters.is_empty() {
-                            (0..table.rows.len()).collect()
-                        } else {
-                            let query = self.search_query.to_lowercase();
-                            (0..table.rows.len())
-                                .filter(|&i| {
-                                    let row = &table.rows[i];
-                                    
-                                    // 1. Global search matches (if query is present)
-                                    let global_match = if query.is_empty() {
-                                        true
-                                    } else {
-                                        row.iter().any(|cell| cell.to_lowercase().contains(&query))
-                                    };
-                                    
-                                    if !global_match {
-                                        return false;
-                                    }
-                                    
-                                    // 2. All column filters must match
-                                    for filter in &self.filters {
-                                        let col_idx = match table.columns.iter().position(|c| c == &filter.column) {
-                                            Some(idx) => idx,
-                                            None => continue,
-                                        };
-                                        if col_idx >= row.len() {
-                                            return false;
-                                        }
-                                        
-                                        let cell_val = &row[col_idx];
-                                        let f_val = &filter.value;
-                                        
-                                        // Attempt numeric comparison if both are parseable as floats
-                                        let cell_num = cell_val.trim().parse::<f64>();
-                                        let filter_num = f_val.trim().parse::<f64>();
-                                        
-                                        let match_filter = match (cell_num, filter_num) {
-                                            (Ok(c_n), Ok(f_n)) => match filter.operator.as_str() {
-                                                "=" => (c_n - f_n).abs() < 1e-9,
-                                                ">" => c_n > f_n,
-                                                "<" => c_n < f_n,
-                                                ">=" => c_n >= f_n,
-                                                "<=" => c_n <= f_n,
-                                                "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
-                                                _ => false,
-                                            },
-                                            _ => match filter.operator.as_str() {
-                                                "=" => cell_val.to_lowercase() == f_val.to_lowercase(),
-                                                "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
-                                                ">" => cell_val.to_lowercase() > f_val.to_lowercase(),
-                                                "<" => cell_val.to_lowercase() < f_val.to_lowercase(),
-                                                ">=" => cell_val.to_lowercase() >= f_val.to_lowercase(),
-                                                "<=" => cell_val.to_lowercase() <= f_val.to_lowercase(),
-                                                _ => false,
-                                            }
-                                        };
-                                        
-                                        if !match_filter {
-                                            return false;
-                                        }
-                                    }
-                                    
-                                    true
-                                })
-                                .collect()
-                        };
-
+                        let filtered_rows = &self.filtered_indices;
                         let total_filtered = filtered_rows.len();
 
                         // Statistics & Filters
@@ -583,9 +774,9 @@ impl EguiEmacsApp for ExplorerApp {
                             };
                             
                             let rows_label = if self.filters.is_empty() && self.search_query.is_empty() {
-                                format!("Rows: {}", table.rows.len())
+                                format!("Rows: {}", table.stats.total_rows)
                             } else {
-                                format!("Rows: {} (filtered to {})", table.rows.len(), total_filtered)
+                                format!("Rows: {} (filtered to {})", table.stats.total_rows, total_filtered)
                             };
 
                             if !self.hidden_columns.is_empty() || !self.filters.is_empty() || !self.search_query.is_empty() {
@@ -724,8 +915,11 @@ impl EguiEmacsApp for ExplorerApp {
                                             .show(ui, |ui| {
                                                 // Draw only the visible rows in current range
                                                 for row_offset in row_range {
+                                                    if row_offset >= self.active_rows.len() {
+                                                        continue;
+                                                    }
                                                     let row_idx = filtered_rows[start_idx + row_offset];
-                                                    let actual_row = &table.rows[row_idx];
+                                                    let actual_row = &self.active_rows[row_offset];
                                                     for (col_idx, cell) in actual_row.iter().enumerate() {
                                                         let col_name = &table.columns[col_idx];
                                                         if self.hidden_columns.contains(col_name) {
@@ -854,3 +1048,145 @@ impl EguiEmacsApp for ExplorerApp {
 pub fn start_app(canvas_id: &str) -> Result<(), JsValue> {
     emacs_egui_sdk::launch_simple(canvas_id, ExplorerApp::new())
 }
+
+async fn scan_and_filter_indices(
+    table: ParquetTable,
+    search_query: String,
+    filters: Vec<ColumnFilter>,
+    version: usize,
+) -> Result<FilterResult, String> {
+    let reader = SerializedFileReader::new(table.bytes.clone()).map_err(|e| e.to_string())?;
+    let mut filtered_indices = Vec::new();
+    let query = search_query.to_lowercase();
+
+    let row_iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
+    
+    let mut current_idx = 0;
+    for record_res in row_iter {
+        if LATEST_FILTER_VERSION.load(Ordering::SeqCst) > version {
+            return Err("Aborted".to_string());
+        }
+
+        let record = record_res.map_err(|e| e.to_string())?;
+        
+        let mut row_str_vals = Vec::new();
+        for (_, field) in record.get_column_iter() {
+            row_str_vals.push(format!("{}", field));
+        }
+
+        let mut matches = true;
+
+        if !query.is_empty() {
+            let global_match = row_str_vals.iter().any(|cell| cell.to_lowercase().contains(&query));
+            if !global_match {
+                matches = false;
+            }
+        }
+
+        if matches && !filters.is_empty() {
+            for filter in &filters {
+                let col_idx = match table.columns.iter().position(|c| c == &filter.column) {
+                    Some(idx) => idx,
+                    None => continue,
+                };
+                if col_idx >= row_str_vals.len() {
+                    matches = false;
+                    break;
+                }
+                
+                let cell_val = &row_str_vals[col_idx];
+                let f_val = &filter.value;
+                
+                let cell_num = cell_val.trim().parse::<f64>();
+                let filter_num = f_val.trim().parse::<f64>();
+                
+                let match_filter = match (cell_num, filter_num) {
+                    (Ok(c_n), Ok(f_n)) => match filter.operator.as_str() {
+                        "=" => (c_n - f_n).abs() < 1e-9,
+                        ">" => c_n > f_n,
+                        "<" => c_n < f_n,
+                        ">=" => c_n >= f_n,
+                        "<=" => c_n <= f_n,
+                        "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
+                        _ => false,
+                    },
+                    _ => match filter.operator.as_str() {
+                        "=" => cell_val.to_lowercase() == f_val.to_lowercase(),
+                        "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
+                        ">" => cell_val.to_lowercase() > f_val.to_lowercase(),
+                        "<" => cell_val.to_lowercase() < f_val.to_lowercase(),
+                        ">=" => cell_val.to_lowercase() >= f_val.to_lowercase(),
+                        "<=" => cell_val.to_lowercase() <= f_val.to_lowercase(),
+                        _ => false,
+                    }
+                };
+
+                if !match_filter {
+                    matches = false;
+                    break;
+                }
+            }
+        }
+
+        if matches {
+            filtered_indices.push(current_idx);
+        }
+
+        current_idx += 1;
+
+        if current_idx % 25000 == 0 {
+            yield_to_browser().await;
+        }
+    }
+
+    Ok(FilterResult {
+        indices: filtered_indices,
+        version,
+    })
+}
+
+async fn yield_to_browser() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let promise = js_sys::Promise::resolve(&wasm_bindgen::JsValue::undefined());
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_parquet_lazy_loading() {
+        let path = "../yellow_tripdata_2023-01.parquet";
+        let bytes = fs::read(path).expect("Failed to read Parquet test file");
+
+        let table = parse_parquet(bytes).expect("Failed to parse Parquet metadata");
+
+        assert_eq!(table.stats.total_rows, 3066766);
+        assert_eq!(table.stats.num_row_groups, 1);
+        assert_eq!(table.columns.len(), 19);
+
+        let subset_rows = table.read_rows_subset(&[0, 1, 2]).expect("Failed to read contiguous subset");
+        assert_eq!(subset_rows.len(), 3);
+        assert_eq!(subset_rows[0].len(), 19);
+
+        let target_indices = vec![0, 1500000, 3000000, 100, 2000000];
+        let decoded_subset = table.read_rows_subset(&target_indices).expect("Failed to read non-contiguous subset");
+        
+        assert_eq!(decoded_subset.len(), 5);
+        for row in &decoded_subset {
+            assert_eq!(row.len(), 19);
+        }
+
+        let row_0 = table.read_rows_subset(&[0]).unwrap();
+        let row_1500000 = table.read_rows_subset(&[1500000]).unwrap();
+        
+        assert_eq!(decoded_subset[0], row_0[0]);
+        assert_eq!(decoded_subset[1], row_1500000[0]);
+    }
+}
+
+

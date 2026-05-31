@@ -9,6 +9,10 @@ An interactive, GPU-accelerated visual data browser and query tool for large Par
 
 Layered on top of the generic [emacs-egui](https://github.com/nohzafk/emacs-egui) host framework, this package brings database-client-grade performance, fluid virtual scrolling, and high-volume analytics directly within a standard Emacs buffer.
 
+## 🎬 Demo
+
+https://github.com/user-attachments/assets/ed77499d-0b2a-4089-9c0d-edc70d013816
+
 ---
 
 ## 🌟 Key Features

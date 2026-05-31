@@ -37,7 +37,7 @@ Layered on top of the generic [emacs-egui](https://github.com/nohzafk/emacs-egui
 
 ### 1. Clone with submodules
 
-`emacs-egui` is bundled under `deps/emacs-egui` (it is not on MELPA), so include submodules:
+`emacs-egui` is bundled under `emacs-egui` at the repository root (it is not on MELPA), so include submodules:
 
 ```sh
 git clone --recurse-submodules https://github.com/nohzafk/emacs-parquet-explorer.git

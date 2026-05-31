@@ -26,13 +26,13 @@
     "Directory containing the emacs-parquet-explorer package files.")
 
   ;; emacs-egui is not published to MELPA; it ships as a bundled git submodule
-  ;; under deps/emacs-egui.  We add it to `load-path' automatically here so that
+  ;; at the repository root.  We add it to `load-path' automatically here so that
   ;; end users only ever have to put THIS package's lisp/ directory on their own
   ;; `load-path' -- the framework is discovered relative to this file.  If
   ;; emacs-egui is ever installed separately, the bundled copy is skipped.
   (unless (featurep 'emacs-egui)
-    (let ((egui-dir (expand-file-name "../deps/emacs-egui/lisp/"
-                                      emacs-parquet-explorer--dir)))
+    (let ((egui-dir (expand-file-name "../emacs-egui/lisp/"
+                                       emacs-parquet-explorer--dir)))
       (unless (file-exists-p (expand-file-name "emacs-egui.el" egui-dir))
         (error "emacs-parquet-explorer: bundled emacs-egui not found under %s.  \
 Clone submodules with: git submodule update --init --recursive" egui-dir))

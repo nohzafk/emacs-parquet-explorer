@@ -17,16 +17,20 @@
   :group 'tools
   :prefix "emacs-parquet-explorer-")
 
-(defvar emacs-parquet-explorer--dir
-  (file-name-directory (or load-file-name buffer-file-name default-directory))
-  "Directory containing the emacs-parquet-explorer package files.")
+(eval-and-compile
+  (defvar emacs-parquet-explorer--dir
+    (file-name-directory (or load-file-name
+                             (bound-and-true-p byte-compile-current-file)
+                             buffer-file-name
+                             default-directory))
+    "Directory containing the emacs-parquet-explorer package files.")
 
-;; Auto-load bundled emacs-egui from the submodule
-(unless (featurep 'emacs-egui)
-  (add-to-list 'load-path
-               (expand-file-name "../deps/emacs-egui/lisp/"
-                                 emacs-parquet-explorer--dir)))
-(require 'emacs-egui)
+  ;; Auto-load bundled emacs-egui from the submodule
+  (unless (featurep 'emacs-egui)
+    (add-to-list 'load-path
+                 (expand-file-name "../deps/emacs-egui/lisp/"
+                                   emacs-parquet-explorer--dir)))
+  (require 'emacs-egui))
 
 ;; Version gate
 (when (version< emacs-egui-version "0.1.0")
@@ -84,7 +88,8 @@
     session))
 
 (defun emacs-parquet-explorer--run-export (input-path output-path)
-  "Asynchronously convert INPUT-PATH (parquet) to OUTPUT-PATH (csv) using native Rust exporter."
+  "Asynchronously convert INPUT-PATH to OUTPUT-PATH (CSV).
+Uses the native Rust exporter."
   (let* ((expanded-input (expand-file-name input-path))
          (expanded-output (expand-file-name output-path))
          (manifest-path (expand-file-name "ui/Cargo.toml" (expand-file-name "../" emacs-parquet-explorer--dir)))

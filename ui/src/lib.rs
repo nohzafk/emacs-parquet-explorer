@@ -451,7 +451,7 @@ impl EguiEmacsApp for ExplorerApp {
                                     // 2. Manual filter form
                                     ui.horizontal(|ui| {
                                         ui.label("Column:");
-                                        egui::ComboBox::from_id_source("filter_column_select")
+                                        egui::ComboBox::from_id_salt("filter_column_select")
                                             .selected_text(&self.filter_col)
                                             .width(140.0)
                                             .show_ui(ui, |ui| {
@@ -462,7 +462,7 @@ impl EguiEmacsApp for ExplorerApp {
 
                                         ui.add_space(8.0);
                                         ui.label("Operator:");
-                                        egui::ComboBox::from_id_source("filter_operator_select")
+                                        egui::ComboBox::from_id_salt("filter_operator_select")
                                             .selected_text(&self.filter_op)
                                             .width(90.0)
                                             .show_ui(ui, |ui| {

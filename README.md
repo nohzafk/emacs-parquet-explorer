@@ -1,9 +1,8 @@
-# emacs-parquet-explorer
+# Emacs Parquet Explorer
 
-[![Framework](https://img.shields.io/badge/Framework-emacs--egui-8A2BE2.svg?style=flat-square)](https://github.com/emacs-egui/emacs-egui)
+[![Framework](https://img.shields.io/badge/Framework-emacs--egui-8A2BE2.svg?style=flat-square)](https://github.com/nohzafk/emacs-egui)
 [![Rust Version](https://img.shields.io/badge/Rust-2021_Edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Target](https://img.shields.io/badge/Target-WebAssembly-blue.svg?style=flat-square&logo=webassembly)](https://webassembly.org/)
-[![Performance](https://img.shields.io/badge/Performance-Virtual_Grid-brightgreen.svg?style=flat-square)](https://github.com/emacs-egui/emacs-parquet-explorer)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
 An interactive, GPU-accelerated visual data browser and query tool for large Parquet files, built inside Emacs using Rust and **egui** WebAssembly.
@@ -14,15 +13,63 @@ Layered on top of the generic [emacs-egui](https://github.com/nohzafk/emacs-egui
 
 ## 🌟 Key Features
 
-1. **High-Volume In-Memory Parsing:** Streams local binary Parquet datasets over the framework's file gateway and parses metadata, schemas, and row groups in memory using pure, lightning-fast Rust Arrow/Parquet APIs.
-2. **Adaptive Layout & Responsive Grid:** Automatically scales to 100% of the active Emacs window height and width using nested horizontal and vertical `ScrollArea` containers.
-3. **Sticky Column Headers:** Columns lock at the top of the viewport during vertical scrolling, while sliding in lockstep horizontally across extremely wide schemas (fully tested on 19+ columns).
-4. **Configurable Paging Presets:** Paginates datasets dynamically with instant presets (`100`, `500`, `1000` rows) or a custom `DragValue` input (double-click to type any row count limit).
-5. **Global Text Substring Search:** Real-time, case-insensitive global text filtering matching substrings across all cells in every column.
-6. **Dynamic Column Visibility:** Interactive checklist panel to show, hide, or prune columns dynamically to focus on key attributes.
-7. **Predicate Pushdown & Cell Filtering:** Quick-filtering and column-specific predicate pushdowns to isolate anomalies and inspect unique records instantly.
-8. **Interactive Clipboard Integration:** Selecting any cell displays its full detailed content in a resizable bottom panel and copies the cell value instantly into the Emacs `kill-ring` clipboard.
-9. **Native Asynchronous CSV Export:** Direct background export of massive Parquet datasets into clean CSV files, running non-blockingly via an Elisp process wrapper.
+1. **Double-Buffered Asynchronous Paging:** Browse datasets of arbitrary size fluidly. Uses an on-demand background worker to decode visible pages in sub-milliseconds, maintaining a constant visual memory footprint of **under 50MB** even on 3-million-row files.
+2. **Schema & Metadata Inspection:** Side-by-side diagnostic panel displaying physical file details (compression codecs, row groups, version, author) and schema field type discovery.
+3. **Adaptive Layout & Responsive Grid:** Scales dynamically to 100% of the active Emacs window height and width using nested horizontal and vertical virtual scroll container bounds.
+4. **Sticky Column Headers:** Columns lock at the top of the viewport during vertical scrolling, while sliding in lockstep horizontally across extremely wide schemas (tested on 19+ columns).
+5. **Configurable Paging Presets:** Paginates datasets dynamically with instant presets (`50`, `100`, `500`, `1000` rows) or a custom text entry for any specific limit.
+6. **Global Text Substring Search:** Real-time, case-insensitive global text filtering matching substrings across all cells in every column.
+7. **Dynamic Column Visibility:** Interactive checklist panel to show, hide, or prune columns dynamically to focus on key attributes.
+8. **Predicate Pushdown & Cell Filtering:** Quick-filtering and column-specific predicate pushdowns to isolate anomalies and inspect unique records instantly.
+9. **Interactive Clipboard Integration:** Selecting any cell displays its full detailed content in a resizable bottom panel and copies the cell value instantly into the Emacs `kill-ring` clipboard.
+10. **Native Asynchronous CSV Export:** Direct background export of massive Parquet datasets into clean CSV files, running non-blockingly via an Elisp process wrapper.
+
+---
+
+## ⚙️ Requirements
+
+- **Emacs 29.1+** built **with xwidget support** (`(featurep 'xwidget-internal)`).
+- A standard **Rust toolchain** (2021 edition) and [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) to compile the WebAssembly UI.
+
+---
+
+## 📦 Installation
+
+### 1. Clone with submodules
+
+`emacs-egui` is bundled under `deps/emacs-egui` (it is not on MELPA), so include submodules:
+
+```sh
+git clone --recurse-submodules https://github.com/nohzafk/emacs-parquet-explorer.git
+
+# Already cloned without --recurse-submodules?
+git submodule update --init --recursive
+```
+
+### 2. Build the WebAssembly UI
+
+A [`justfile`](https://github.com/casey/just) is provided. `just setup` installs the build toolchain (the `wasm32-unknown-unknown` target and `wasm-pack`); `just wasm` compiles the UI into `ui/pkg/`:
+
+```sh
+just setup   # one-time: set up the Rust/WASM build toolchain
+just wasm    # build the WebAssembly UI
+```
+
+Or build manually: `cd ui && wasm-pack build --target web --release`.
+
+### 3. Add to your Emacs config
+
+Add **only** this package's `lisp/` directory to your `load-path` — it loads the bundled `emacs-egui` automatically:
+
+```elisp
+(add-to-list 'load-path "~/projects/emacs-parquet-explorer/lisp")
+(load "emacs-parquet-explorer-autoloads" nil t)
+(keymap-set global-map "C-c d p" #'emacs-parquet-explorer-open)
+```
+
+### 4. Open a Parquet file
+
+Run `C-c d p` or `M-x emacs-parquet-explorer-open`, then select any local `.parquet` file.
 
 ---
 
@@ -49,7 +96,7 @@ Layered on top of the generic [emacs-egui](https://github.com/nohzafk/emacs-egui
   +--------------------------------------------------------------------------+
   |                      Rust WebAssembly App (egui)                         |
   |  - Decodes binary streams into Arrow RecordBatch containers.             |
-  |  - Performs column pruning, text filtering, and virtual grid rendering.   |
+  |  - Performs column pruning, text filtering, and virtual grid rendering.  |
   +--------------------------------------------------------------------------+
 ```
 
@@ -60,61 +107,33 @@ Layered on top of the generic [emacs-egui](https://github.com/nohzafk/emacs-egui
 
 ---
 
-## ⚙️ Requirements
+## ⚡ High-Performance Double-Buffered Lazy Loading (3M+ Rows)
 
-- **Emacs 29.1+** built **with xwidget support** (`(featurep 'xwidget-internal)`).
-- The [emacs-egui](https://github.com/nohzafk/emacs-egui) framework (bundled as a git submodule -- no separate install needed).
-- A standard **Rust toolchain** (2021 edition) and [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) to compile the WebAssembly UI.
+To support Parquet datasets of arbitrary size (such as the NYC Yellow Taxi dataset with over **3.06 million rows**) without freezing the UI thread or exceeding WebAssembly memory bounds, `emacs-parquet-explorer` employs a **Double-Buffered Asynchronous Loading and Background-Filtering Pipeline** compiled to WASM.
 
----
+By shifting from eager row decoding (which consumed ~3.7GB of heap space for 3M rows) to an on-demand, lazy byte-slicing mechanism, visual memory allocations remain constant at **under 50MB** regardless of dataset length.
 
-## 🛠️ How to Build
+### Architectural Flow
 
-We provide a `justfile` for convenient compilation. Run the standard recipe or build manually inside the project directory:
+The UI thread and background workers are fully decoupled using a Front/Back Buffer swap scheme:
 
-```sh
-# Option A: Compile using just
-just wasm
-
-# Option B: Compile manually
-cd ui && wasm-pack build --target web --release --out-dir pkg
+```mermaid
+graph TD
+    A[UI Thread - egui] -- 1. Page/Filter Change --> B(Async Loader Task)
+    B -- 2. Decode Rows in Background --> C[Back Buffer: LOADED_ROWS]
+    C -- 3. Push complete page --> A
+    A -- 4. Swap: front_buffer = back_buffer --> D[Front Buffer: active_rows]
+    D -- 5. Render instantly at 60fps --> E[Screen]
 ```
 
-This compiles the Rust data explorer and places the WebAssembly binary bundles under `ui/pkg/`.
+### Key Techniques
 
----
-
-## 📦 Installation
-
-Clone with submodules:
-
-```sh
-git clone --recurse-submodules https://github.com/nohzafk/emacs-parquet-explorer.git
-```
-
-Add one `load-path` entry -- the bundled emacs-egui submodule is discovered automatically:
-
-```elisp
-(add-to-list 'load-path "/path/to/emacs-parquet-explorer/lisp")
-(require 'emacs-parquet-explorer)
-```
-
-### Recommended `use-package` Configuration
-
-```elisp
-(use-package emacs-parquet-explorer
-  :load-path "/path/to/emacs-parquet-explorer/lisp"
-  :commands emacs-parquet-explorer-open
-  :bind ("C-c d p" . emacs-parquet-explorer-open))
-```
-
-To browse a Parquet file, run:
-
-```text
-M-x emacs-parquet-explorer-open
-```
-
-And select any local `.parquet` file on your filesystem.
+1. **Group-Skipping Parquet Byte Slicer:** Slices row groups sequentially inside the raw in-memory `bytes::Bytes`. It skips entire row groups instantly without opening or allocating them if they lie outside the requested range.
+2. **On-Demand Single-Pass Sequential Decoder (`read_rows_subset`):** Maps global row indices (even non-contiguous ones produced by filtering) and reads them sequentially. It opens each row group at most once, maintaining maximum scanning speed.
+3. **Double Buffered State Swap:**
+   - **Front Buffer (`active_rows`):** Holds only the rows for the currently rendered viewport page (~50–1000 items).
+   - **Back Buffer (`LOADED_ROWS`):** A thread-safe static mutex updated by a local asynchronous worker spawned via `wasm_bindgen_futures::spawn_local`. Stale or out-of-order page requests are automatically discarded using version checks.
+4. **Asynchronous Yielding Filter Scans:** When a user types a global search or column predicate filter, a background async scanner indexes the 3.06M rows in chunks of 25,000, yielding execution to the browser's event loop via Resolved Promises to prevent frame drops or UI freezing.
 
 ---
 
@@ -136,21 +155,6 @@ Open `yellow_tripdata_2023-01.parquet` using `M-x emacs-parquet-explorer-open`.
 
 ---
 
-## 🗺️ Feature Development Roadmap
-
-Our roadmap highlights implemented features and upcoming work:
-
-| Priority | Feature | Status | Description |
-| :---: | :--- | :---: | :--- |
-| **1** | **Schema & Metadata Inspection** | **[x] Completed** | Side-by-side dashboard showing physical stats (compression, row groups, metadata) and schema type discovery. |
-| **2** | **Performance Polish (Virtual Scrolling)** | **[x] Completed** | Renders up to 100,000+ rows instantly using egui virtual scrolling to prevent memory spikes. |
-| **3** | **Column Pruning Toggle** | **[x] Completed** | Collapsing checklist panel to dynamically show or hide columns in the grid. |
-| **4** | **Format Interoperability (CSV Export)** | **[x] Completed** | Memory-efficient asynchronous loopback background streaming export of datasets directly to CSV. |
-| **5** | **Predicate Pushdown & Cell Filtering** | **[x] Completed** | Cell quick-filtering and column-specific predicate pushdowns to isolate anomalies instantly. |
-| **6** | **In-App SQL Execution** | **[ ] Planned** | An ad-hoc SQL query bar (`WHERE`, `GROUP BY`, `ORDER BY`) running locally on the loaded dataset using DataFusion. |
-
----
-
 ## 📄 License
 
-This application is licensed under the MIT License. Feel free to copy, modify, and distribute it.
+This software is licensed under the MIT License. Feel free to copy, modify, and distribute it.

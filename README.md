@@ -92,7 +92,7 @@ must opt in to the build step via `package-vc-allow-build-commands`, since
        :rev :newest
        :lisp-dir "lisp"
        :shell-command
-       "git submodule update --init --recursive && cd ui && wasm-pack build --target web --release")
+       "git submodule update --init --recursive && cd ui && wasm-pack build --target web --release && cargo build --release --bins")
   :bind ("C-c d p" . emacs-parquet-explorer-open))
 ```
 
@@ -106,7 +106,7 @@ git clone --recurse-submodules https://github.com/nohzafk/emacs-parquet-explorer
   ~/src/emacs-parquet-explorer
 cd ~/src/emacs-parquet-explorer
 just setup   # one-time: wasm32-unknown-unknown target + wasm-pack
-just wasm    # build the UI into ui/pkg/
+just wasm    # build both the WASM UI and native sidecar binaries
 # (already cloned shallow? git submodule update --init --recursive)
 ```
 

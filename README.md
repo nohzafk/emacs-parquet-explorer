@@ -156,16 +156,111 @@ Run `C-c d p` or `M-x emacs-parquet-explorer-open`, then select any local
 
 - **Emacs Clipboard Sync:** When a user selects a cell inside the grid, egui triggers the `cell-selected` event. The Elisp layer catches the action, extracts the value, pushes it onto the `kill-ring`, and outputs a clean minibuffer message.
 - **Asynchronous CSV Export:** When the user clicks "Export CSV" inside the egui layout, it triggers the `export-csv` event. Emacs prompts the user for a destination path, resolves the absolute paths, and invokes `cargo run --bin parquet_to_csv` via an asynchronous process (`make-process`), keeping the Emacs UI completely responsive during massive exports.
+- **Native Filter Offload:** When the search query or column filters change, egui emits a `filter-request` event. Emacs feeds it to a persistent native scanner process and pushes the matching row indices back to the UI — moving the heavy scan off the WebView's single thread entirely (see [🚀 Native Multi-Core Sidecar](#-native-multi-core-sidecar)).
 
 ---
 
-## ⚡ High-Performance Double-Buffered Lazy Loading (3M+ Rows)
+## 🧵 Threading Model & Bottleneck
 
-To support Parquet datasets of arbitrary size (such as the NYC Yellow Taxi dataset with over **3.06 million rows**) without freezing the UI thread or exceeding WebAssembly memory bounds, `emacs-parquet-explorer` employs a **Double-Buffered Asynchronous Loading and Background-Filtering Pipeline** compiled to WASM.
+The diagram below maps the data path onto the threads it actually runs on —
+where bytes are distributed, where they are parsed, and where the work is
+forced onto a single thread.
 
-By shifting from eager row decoding (which consumed ~3.7GB of heap space for 3M rows) to an on-demand, lazy byte-slicing mechanism, visual memory allocations remain constant at **under 50MB** regardless of dataset length.
+```mermaid
+flowchart TD
+    subgraph EMACS["Emacs process — native, real OS threads"]
+        EL["Elisp controller"]
+        AS["emacs-egui asset server<br/>/app · /api/file?path="]
+        CSV["CSV export via make-process<br/>(separate native process)"]
+        EL --> AS
+        EL -.->|spawns| CSV
+    end
 
-### Architectural Flow
+    subgraph WV["xwidget WebView (WKWebView / WebKit — multi-process)"]
+        direction TB
+        subgraph MAIN["SINGLE MAIN THREAD — the bottleneck"]
+            direction TB
+            FETCH["1 · fetch file bytes — async I/O, non-blocking"]
+            BYTES["2 · bytes::Bytes — raw parquet in WASM linear memory"]
+            PARSE["3 · Arrow columnar decode: cast columns to text<br/>CPU-bound PARSING"]
+            MATCH["4 · row_matches scan to filtered_indices<br/>CPU-bound MATCHING"]
+            PAGE["5 · read_rows_subset — materialize visible page"]
+            EGUI["6 · egui update + tessellate to mesh"]
+            FETCH --> BYTES --> PARSE --> MATCH --> PAGE --> EGUI
+            PARSE -.->|yield every 25k rows| EGUI
+        end
+        GPU["GPU / compositor process<br/>WebGL rasterization — OFF the main thread"]
+        EGUI -->|vertex mesh| GPU
+    end
+
+    AS ==>|HTTP localhost byte stream| FETCH
+    GPU -->|pixels| SCREEN["Rendered into the Emacs buffer"]
+
+    style MAIN fill:#ffe6e6,stroke:#d33,stroke-width:3px
+    style GPU fill:#e6f7e6,stroke:#3a3
+```
+
+- **Data distribution (1–2)** is *not* the bottleneck: bytes arrive over an `await`-ed localhost stream from Emacs's asset server — async I/O, done once.
+- **Parsing + matching (3–4)** *is* the bottleneck: decoding Parquet → Arrow → text and scanning millions of rows is pure CPU work on the **WebView's single main thread** — the same thread that drives the egui frame loop.
+- **Rendering is off that thread:** egui only builds a vertex mesh on the main thread; the actual WebGL rasterization runs in WebKit's **GPU process**. That is why "WebGL is fast" and why fast rendering does nothing for the parse bottleneck — they live on different threads.
+
+### The Single-Thread Constraint
+
+All Rust/WASM application logic (Parquet decode **and** the egui frame loop) runs on **one JS thread** inside the embedded WebView. True *in-WebView* parallelism would need **Web Workers + WASM threads**, which require `SharedArrayBuffer` gated behind cross-origin isolation (COOP/COEP headers) — awkward/unavailable through emacs-egui's local asset server in the xwidget context, and `eframe`'s default web build is single-threaded regardless.
+
+This package attacks the constraint from two directions:
+
+1. **Make the one thread do less** — the in-WASM scan is heavily tuned (vectorized Arrow decode, allocation-free matching, debounced input, incremental narrowing, cooperative yielding). Fast enough for most queries, and the fallback whenever the sidecar is off. See [⚡ High-Performance](#-high-performance).
+2. **Step outside the WebView** — by default the heavy scan is handed to a native, multi-core Rust process orchestrated by Emacs, which parses the file once and fans the scan across every CPU core. See [🚀 Native Multi-Core Sidecar](#-native-multi-core-sidecar).
+
+---
+
+## 🚀 Native Multi-Core Sidecar
+
+Because Emacs is a native, multi-threaded host, the heavy scan does not have to run inside the WebView at all. By default (`emacs-parquet-explorer-use-native-filter`, set to `nil` to force the in-WASM path) each session starts a persistent **`parquet_filter --serve`** daemon. It parses the Parquet file **once** at startup and then answers queries from memory, scanning across **all CPU cores** with `rayon`. Search and filtering therefore leave the WebView's single thread entirely — the UI only renders the resulting page.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as WASM UI (1 thread)
+    participant EL as Emacs broker (Elisp)
+    participant SC as parquet_filter --serve (all cores)
+    Note over SC: Parquet file parsed ONCE at startup
+    UI->>EL: filter-request {token, query, filters}
+    EL->>SC: stdin {token, query, filters, out}
+    Note over SC: scan_parallel across N cores (rayon)
+    SC->>SC: write matching indices to out file
+    SC->>EL: stdout {token, path, count}
+    EL->>UI: state push {filter_result {token, path}}
+    UI->>EL: GET /api/file?path=out
+    EL-->>UI: index bytes
+    Note over UI: materialize + render the page
+```
+
+Design notes:
+
+- **Parse once, serve many:** the daemon keeps the file in memory, so per-query cost is just the parallel scan — no re-read, no re-parse, no process spawn. A full global scan over 3M rows finishes in a few hundred milliseconds; a column-only predicate (which projects just that column) in tens.
+- **Results by reference:** a match set can run into the millions of indices, so the daemon writes them to a temp file and returns only its path. The UI fetches that file through the asset server (`/api/file?path=`) instead of marshalling a giant array through `execute-script`.
+- **Latest-wins coalescing:** while a scan is in flight, only the most recent query is queued; superseded results are discarded by `token`.
+- **Graceful fallback:** if the sidecar is disabled, the file is unreadable, or the daemon errors or exits, the UI falls back to the in-WASM scan — so search always works.
+
+> The sidecar needs the Rust toolchain at runtime; its binary is built automatically on first use. Set `emacs-parquet-explorer-use-native-filter` to `nil` to run everything in-WASM with no native process.
+
+---
+
+## ⚡ High-Performance
+
+Working with multi-million-row Parquet files inside an embedded WebView demands
+care on two fronts: loading rows for display without blowing the memory budget,
+and searching or filtering across the whole dataset without freezing the UI.
+
+### Double-Buffered Lazy Loading (3M+ Rows)
+
+To support Parquet datasets of arbitrary size (such as the NYC Yellow Taxi dataset with over **3.06 million rows**) without freezing the UI thread or exceeding WebAssembly memory bounds, `emacs-parquet-explorer` employs a **Double-Buffered Asynchronous Loading Pipeline** compiled to WASM.
+
+By shifting from eager row decoding (which consumed ~3.7GB of heap space for 3M rows) to on-demand row materialization, visual memory allocations remain constant at **under 50MB** regardless of dataset length.
+
+#### Architectural Flow
 
 The UI thread and background workers are fully decoupled using a Front/Back Buffer swap scheme:
 
@@ -178,14 +273,24 @@ graph TD
     D -- 5 Render instantly at 60fps --> E[Screen]
 ```
 
-### Key Techniques
+#### Key Techniques
 
-1. **Group-Skipping Parquet Byte Slicer:** Slices row groups sequentially inside the raw in-memory `bytes::Bytes`. It skips entire row groups instantly without opening or allocating them if they lie outside the requested range.
-2. **On-Demand Single-Pass Sequential Decoder (`read_rows_subset`):** Maps global row indices (even non-contiguous ones produced by filtering) and reads them sequentially. It opens each row group at most once, maintaining maximum scanning speed.
-3. **Double Buffered State Swap:**
+1. **In-Memory Byte Source:** The raw Parquet file is held once as `bytes::Bytes`; every reader is constructed over this shared buffer, so no bytes are re-read or re-allocated per page.
+2. **On-Demand Row Materialization (`read_rows_subset`):** Maps the global row indices for the current page (even non-contiguous ones produced by filtering) into an Arrow `RowSelection`, so the reader materializes only those rows and skips the rest of the file.
+3. **Double-Buffered State Swap:**
    - **Front Buffer (`active_rows`):** Holds only the rows for the currently rendered viewport page (~50–1000 items).
    - **Back Buffer (`LOADED_ROWS`):** A thread-safe static mutex updated by a local asynchronous worker spawned via `wasm_bindgen_futures::spawn_local`. Stale or out-of-order page requests are automatically discarded using version checks.
-4. **Asynchronous Yielding Filter Scans:** When a user types a global search or column predicate filter, a background async scanner indexes the 3.06M rows in chunks of 25,000, yielding execution to the browser's event loop via Resolved Promises to prevent frame drops or UI freezing.
+
+### Search & Filter Acceleration (in-WASM path)
+
+When scans run inside the WebView — the fallback whenever the [native sidecar](#-native-multi-core-sidecar) is disabled or unavailable — they cover the entire dataset on a single thread, so the path is tuned to stay responsive while typing and to minimise repeated work:
+
+1. **Debounced Input:** A search keystroke waits ~250ms before launching a scan, so typing a multi-character query triggers a single scan instead of one per key (filters, added by click, still apply immediately).
+2. **Vectorized Arrow Decode:** Scans decode through the Arrow columnar reader, casting whole columns to text in one pass rather than materializing a record per row — cutting full-scan decode time by roughly **3×**. A column-only filter additionally projects just the filtered columns, skipping the rest.
+3. **Allocation-Free Matching:** Case-insensitive substring matching compares bytes in place (ASCII case-folding) instead of allocating a lowercased `String` per cell — eliminating ~57M allocations per full scan.
+4. **Incremental Narrowing:** When a query only grows (e.g. `joh` → `john`) and filters are unchanged, the new matches are a subset of the current results, so only those rows are re-scanned via a `RowSelection` — each extra character scans a shrinking set rather than all 3M rows.
+
+Stale or superseded scans are cancelled mid-flight via version checks, and long scans yield to the browser event loop every 25,000 rows to keep rendering fluid.
 
 ---
 

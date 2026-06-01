@@ -10,6 +10,10 @@ crate-type = ["cdylib", "rlib"]
 name = "parquet_to_csv"
 path = "src/bin/parquet_to_csv.rs"
 
+[[bin]]
+name = "parquet_filter"
+path = "src/bin/parquet_filter.rs"
+
 [dependencies]
 emacs-egui-sdk = { path = "../emacs-egui/sdk" }
 parquet = { version = "53.0", default-features = false, features = ["arrow", "snap", "flate2"] }
@@ -25,5 +29,10 @@ bytes = "1.0"
 lazy_static = "1.4"
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
+
+# Native-only: the parallel scanner used by the parquet_filter sidecar. Excluded
+# from the wasm build (no threads in the WebView sandbox).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
 
 

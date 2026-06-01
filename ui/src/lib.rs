@@ -45,7 +45,7 @@ pub struct ExplorerState {
     pub filepath: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ColumnFilter {
     pub column: String,
     pub operator: String, // "contains", "=", ">", "<", ">=", "<="
@@ -191,7 +191,7 @@ fn utf8_cell<'a>(cols: &[&'a StringArray], row: usize, col: usize) -> &'a str {
     }
 }
 
-fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
+pub fn parse_parquet(bytes: Vec<u8>) -> Result<ParquetTable, String> {
     let bytes = bytes::Bytes::from(bytes);
     let reader = SerializedFileReader::new(bytes.clone()).map_err(|e| e.to_string())?;
 
@@ -1218,6 +1218,23 @@ fn row_matches<S: AsRef<str>>(
     true
 }
 
+/// Columns the scan must decode: every column for a global text query, or just
+/// the filtered columns for a filter-only scan. Returned ascending & unique so
+/// the projected batch column order lines up with the names.
+fn projection_for(table: &ParquetTable, query: &str, filters: &[ColumnFilter]) -> Vec<usize> {
+    let mut proj: Vec<usize> = if query.is_empty() {
+        filters
+            .iter()
+            .filter_map(|f| table.columns.iter().position(|c| c == &f.column))
+            .collect()
+    } else {
+        (0..table.columns.len()).collect()
+    };
+    proj.sort_unstable();
+    proj.dedup();
+    proj
+}
+
 async fn scan_and_filter_indices(
     table: ParquetTable,
     search_query: String,
@@ -1231,18 +1248,7 @@ async fn scan_and_filter_indices(
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(table.bytes.clone()).map_err(|e| e.to_string())?;
 
-    // A global text query must inspect every column; a filter-only scan needs
-    // only the filtered columns, so project those and skip decoding the rest.
-    let mut proj_cols: Vec<usize> = if query.is_empty() {
-        filters
-            .iter()
-            .filter_map(|f| table.columns.iter().position(|c| c == &f.column))
-            .collect()
-    } else {
-        (0..table.columns.len()).collect()
-    };
-    proj_cols.sort_unstable();
-    proj_cols.dedup();
+    let proj_cols = projection_for(&table, &query, &filters);
     if proj_cols.is_empty() {
         // No column to scan against -> nothing further constrains the result.
         return Ok(FilterResult {
@@ -1310,6 +1316,102 @@ async fn scan_and_filter_indices(
         indices: filtered_indices,
         version,
     })
+}
+
+/// Scan a contiguous global row range `[start, end)` via a projected reader with
+/// a RowSelection, returning the matching global indices (ascending). Native
+/// helper for the parallel scanner.
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_range(
+    bytes: &bytes::Bytes,
+    query: &str,
+    filters: &[ColumnFilter],
+    proj_cols: &[usize],
+    proj_names: &[String],
+    start: usize,
+    end: usize,
+) -> Result<Vec<usize>, String> {
+    if start >= end {
+        return Ok(Vec::new());
+    }
+
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(bytes.clone()).map_err(|e| e.to_string())?;
+    let mask = ProjectionMask::leaves(builder.parquet_schema(), proj_cols.iter().cloned());
+
+    let mut selectors = Vec::new();
+    if start > 0 {
+        selectors.push(RowSelector::skip(start));
+    }
+    selectors.push(RowSelector::select(end - start));
+
+    let reader = builder
+        .with_projection(mask)
+        .with_row_selection(RowSelection::from(selectors))
+        .with_batch_size(8192)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    let mut cursor = start; // first selected row maps to global index `start`
+    for batch in reader {
+        let batch = batch.map_err(|e| e.to_string())?;
+        let utf8 = batch_to_utf8(&batch)?;
+        let cols = downcast_utf8(&utf8);
+        let mut row_buf: Vec<&str> = Vec::with_capacity(cols.len());
+        for r in 0..batch.num_rows() {
+            row_buf.clear();
+            for c in 0..cols.len() {
+                row_buf.push(utf8_cell(&cols, r, c));
+            }
+            if row_matches(&row_buf, query, filters, proj_names) {
+                out.push(cursor + r);
+            }
+        }
+        cursor += batch.num_rows();
+    }
+    Ok(out)
+}
+
+/// Multi-threaded full scan for the native sidecar: split the row range into
+/// `threads` contiguous slices, scan them in parallel with rayon, and merge the
+/// (already ascending) partial results. Not available in the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_parallel(
+    table: &ParquetTable,
+    search_query: &str,
+    filters: &[ColumnFilter],
+    threads: usize,
+) -> Result<Vec<usize>, String> {
+    use rayon::prelude::*;
+
+    let query = search_query.to_ascii_lowercase();
+    let total = table.stats.total_rows as usize;
+    let proj_cols = projection_for(table, &query, filters);
+    if proj_cols.is_empty() || total == 0 {
+        return Ok((0..total).collect());
+    }
+    let proj_names: Vec<String> = proj_cols.iter().map(|&i| table.columns[i].clone()).collect();
+
+    let threads = threads.max(1);
+    let chunk = total.div_ceil(threads);
+    let ranges: Vec<(usize, usize)> = (0..threads)
+        .map(|t| (t * chunk, ((t + 1) * chunk).min(total)))
+        .filter(|(s, e)| s < e)
+        .collect();
+
+    // collect() preserves input order, so concatenating the ascending,
+    // contiguous slices yields globally ascending indices.
+    let partials: Result<Vec<Vec<usize>>, String> = ranges
+        .par_iter()
+        .map(|&(s, e)| scan_range(&table.bytes, &query, filters, &proj_cols, &proj_names, s, e))
+        .collect();
+
+    let mut out = Vec::new();
+    for part in partials? {
+        out.extend(part);
+    }
+    Ok(out)
 }
 
 async fn yield_to_browser() {
@@ -1418,6 +1520,40 @@ mod tests {
             off += batch.num_rows();
         }
         out
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_scan_serial_vs_parallel() {
+        use std::time::Instant;
+        let table = parse_parquet(fs::read("../yellow_tripdata_2023-01.parquet").unwrap()).unwrap();
+        let query = "n";
+
+        let t = Instant::now();
+        let serial = scan_parallel(&table, query, &[], 1).unwrap();
+        let serial_ms = t.elapsed().as_millis();
+
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let t = Instant::now();
+        let parallel = scan_parallel(&table, query, &[], threads).unwrap();
+        let par_ms = t.elapsed().as_millis();
+
+        assert_eq!(serial, parallel, "parallel split must equal serial scan");
+        println!("\nserial(1):    {} ms ({} matches)", serial_ms, serial.len());
+        println!("parallel({}): {} ms ({} matches)", threads, par_ms, parallel.len());
+    }
+
+    #[test]
+    fn test_scan_parallel_matches_reference() {
+        let table = parse_parquet(fs::read("../yellow_tripdata_2023-01.parquet").unwrap()).unwrap();
+        // Native parallel scan must agree with the single-threaded reference for
+        // both a global query and a column filter.
+        let got = scan_parallel(&table, "2023", &[], 4).unwrap();
+        assert_eq!(got, reference_scan(&table, "2023", &[]));
+
+        let filters = vec![cf("passenger_count", ">", "4")];
+        let got = scan_parallel(&table, "", &filters, 4).unwrap();
+        assert_eq!(got, reference_scan(&table, "", &filters));
     }
 
     #[test]

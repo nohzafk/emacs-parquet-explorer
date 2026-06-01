@@ -964,36 +964,34 @@ impl EguiEmacsApp for ExplorerApp {
                         ui.columns(2, |columns| {
                             // Column 0: File properties card
                             columns[0].vertical(|ui| {
-                                ui.group(|ui| {
-                                    ui.heading("📋 Physical Properties");
-                                    ui.separator();
-                                    
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Total Rows:");
-                                        ui.label(format!("{}", table.stats.total_rows));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Row Groups:");
-                                        ui.label(format!("{}", table.stats.num_row_groups));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Parquet Version:");
-                                        ui.label(format!("{}", table.stats.version));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Created By:");
-                                        ui.label(&table.stats.created_by);
-                                    });
-                                    ui.add_space(4.0);
-                                    ui.strong("Compression Codecs:");
-                                    if table.stats.compression_codecs.is_empty() {
-                                        ui.label(egui::RichText::new("None").weak());
-                                    } else {
-                                        for codec in &table.stats.compression_codecs {
-                                            ui.label(format!("• {}", codec));
-                                        }
-                                    }
+                                ui.heading("📋 Physical Properties");
+                                ui.separator();
+                                
+                                ui.horizontal(|ui| {
+                                    ui.strong("Total Rows:");
+                                    ui.label(format!("{}", table.stats.total_rows));
                                 });
+                                ui.horizontal(|ui| {
+                                    ui.strong("Row Groups:");
+                                    ui.label(format!("{}", table.stats.num_row_groups));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.strong("Parquet Version:");
+                                    ui.label(format!("{}", table.stats.version));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.strong("Created By:");
+                                    ui.label(&table.stats.created_by);
+                                });
+                                ui.add_space(4.0);
+                                ui.strong("Compression Codecs:");
+                                if table.stats.compression_codecs.is_empty() {
+                                    ui.label(egui::RichText::new("None").weak());
+                                } else {
+                                    for codec in &table.stats.compression_codecs {
+                                        ui.label(format!("• {}", codec));
+                                    }
+                                }
                             });
 
                             // Column 1: Schema descriptor table

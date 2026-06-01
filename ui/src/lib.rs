@@ -372,13 +372,6 @@ pub struct ExplorerApp {
     search_pending: bool,
     search_edit_time: f64,
 
-    // Query/filters that produced the current `filtered_indices` (for
-    // incremental narrowing), and those of the in-flight scan.
-    applied_query: String,
-    applied_filters: Vec<ColumnFilter>,
-    scanning_query: String,
-    scanning_filters: Vec<ColumnFilter>,
-
     // When true, scans are offloaded to the native sidecar via Emacs instead of
     // running on the WASM thread.
     native_filter_available: bool,
@@ -421,11 +414,6 @@ impl ExplorerApp {
             search_pending: false,
             search_edit_time: 0.0,
 
-            applied_query: String::new(),
-            applied_filters: Vec::new(),
-            scanning_query: String::new(),
-            scanning_filters: Vec::new(),
-
             native_filter_available: false,
         }
     }
@@ -442,45 +430,34 @@ impl ExplorerApp {
         if self.search_query.is_empty() && self.filters.is_empty() {
             self.filtered_indices = (0..table.stats.total_rows as usize).collect();
             self.filtering_in_progress = false;
-            self.applied_query = String::new();
-            self.applied_filters = Vec::new();
             return;
         }
 
         self.filtering_in_progress = true;
-        self.scanning_query = self.search_query.clone();
-        self.scanning_filters = self.filters.clone();
 
         if self.native_filter_available {
             // Offload the full scan to the native multi-core sidecar via Emacs.
             self.emit_filter_request(new_version);
         } else {
-            // Single-threaded WASM scan with incremental narrowing: if the
-            // filters are unchanged and the new query merely extends the applied
-            // one (the applied query is a substring of it), every new match is
-            // already inside the current result set, so re-scan only those rows.
-            let incremental = self.filters == self.applied_filters
-                && self.search_query.contains(&self.applied_query)
-                && (!self.applied_query.is_empty() || !self.applied_filters.is_empty());
-            let base = incremental.then(|| self.filtered_indices.clone());
-            self.spawn_local_scan(new_version, base);
+            // Single-threaded WASM scan: plain full-scan fallback.
+            self.spawn_local_scan(new_version);
         }
     }
 
     /// Spawn the in-WASM async scan for `version`, routing the result through the
     /// FILTER_RESULTS channel that `update` polls. Uses the in-flight
     /// `scanning_query`/`scanning_filters`.
-    fn spawn_local_scan(&self, version: usize, base: Option<Vec<usize>>) {
+    fn spawn_local_scan(&self, version: usize) {
         let Some(ref table) = self.parquet_table else {
             return;
         };
         let table_cloned = table.clone();
-        let query = self.scanning_query.clone();
-        let filters = self.scanning_filters.clone();
+        let query = self.search_query.clone();
+        let filters = self.filters.clone();
 
         emacs_egui_sdk::wasm_bindgen_futures::spawn_local(async move {
             let scan_res =
-                scan_and_filter_indices(table_cloned, query, filters, base, version).await;
+                scan_and_filter_indices(table_cloned, query, filters, version).await;
             if let Ok(mut guard) = FILTER_RESULTS.lock() {
                 *guard = Some(scan_res);
             }
@@ -510,7 +487,7 @@ impl ExplorerApp {
             return; // superseded by a newer request
         }
         if !fr.error.is_empty() {
-            self.spawn_local_scan(fr.token, None);
+            self.spawn_local_scan(fr.token);
             return;
         }
         if fr.path.is_empty() {
@@ -637,8 +614,6 @@ impl EguiEmacsApp for ExplorerApp {
                         if filter_result.version == self.filter_version {
                             self.filtered_indices = filter_result.indices;
                             self.filtering_in_progress = false;
-                            self.applied_query = self.scanning_query.clone();
-                            self.applied_filters = self.scanning_filters.clone();
                         }
                     }
                     Err(err) => {
@@ -1337,7 +1312,6 @@ async fn scan_and_filter_indices(
     table: ParquetTable,
     search_query: String,
     filters: Vec<ColumnFilter>,
-    base: Option<Vec<usize>>,
     version: usize,
 ) -> Result<FilterResult, String> {
     let query = search_query.to_ascii_lowercase();
@@ -1350,7 +1324,7 @@ async fn scan_and_filter_indices(
     if proj_cols.is_empty() {
         // No column to scan against -> nothing further constrains the result.
         return Ok(FilterResult {
-            indices: base.unwrap_or_else(|| (0..table.stats.total_rows as usize).collect()),
+            indices: (0..table.stats.total_rows as usize).collect(),
             version,
         });
     }
@@ -1360,20 +1334,7 @@ async fn scan_and_filter_indices(
     let proj_names: Vec<String> = proj_cols.iter().map(|&i| table.columns[i].clone()).collect();
     let mask = ProjectionMask::leaves(builder.parquet_schema(), proj_cols.iter().cloned());
 
-    // Incremental narrowing: restrict the reader to the prior candidate rows via
-    // a RowSelection. Selected rows then arrive in ascending order, so the k-th
-    // decoded row maps back to base[k]. A full scan maps row r -> global r.
-    let base_sorted = base.map(|mut b| {
-        b.sort_unstable();
-        b.dedup();
-        b
-    });
-
-    let mut builder = builder.with_projection(mask).with_batch_size(8192);
-    if let Some(ref sorted) = base_sorted {
-        builder = builder.with_row_selection(row_selection_for(sorted));
-    }
-    let reader = builder.build().map_err(|e| e.to_string())?;
+    let reader = builder.with_projection(mask).with_batch_size(8192).build().map_err(|e| e.to_string())?;
 
     let mut cursor = 0usize;
     let mut since_yield = 0usize;
@@ -1394,11 +1355,7 @@ async fn scan_and_filter_indices(
                 row_buf.push(utf8_cell(&cols, r, c));
             }
             if row_matches(&row_buf, &query, &filters, &proj_names) {
-                let global = match base_sorted {
-                    Some(ref s) => s[cursor + r],
-                    None => cursor + r,
-                };
-                filtered_indices.push(global);
+                filtered_indices.push(cursor + r);
             }
         }
 
@@ -1664,19 +1621,13 @@ mod tests {
         // exercises the all-columns projection and timestamp rendering and should
         // match the vast majority of rows. (A handful of dirty records carry
         // out-of-range years, so it is not literally every row.)
-        let got = block_on(scan_and_filter_indices(table.clone(), "2023".into(), vec![], None, 0)).unwrap().indices;
+        let got = block_on(scan_and_filter_indices(table.clone(), "2023".into(), vec![], 0)).unwrap().indices;
         assert_eq!(got, reference_scan(&table, "2023", &[]));
         assert!(got.len() > table.stats.total_rows as usize - 1000 && !got.is_empty());
 
-        // Incremental narrowing: extending "2023" -> "2023-" from the prior
-        // result set must match a full scan, since the matches are a subset.
-        let inc = block_on(scan_and_filter_indices(table.clone(), "2023-".into(), vec![], Some(got.clone()), 0)).unwrap().indices;
-        let full = block_on(scan_and_filter_indices(table.clone(), "2023-".into(), vec![], None, 0)).unwrap().indices;
-        assert_eq!(inc, full);
-
         // Filter-only scan exercises the projected (single-column) path.
         let filters = vec![cf("passenger_count", ">", "4")];
-        let got = block_on(scan_and_filter_indices(table.clone(), String::new(), filters.clone(), None, 0)).unwrap().indices;
+        let got = block_on(scan_and_filter_indices(table.clone(), String::new(), filters.clone(), 0)).unwrap().indices;
         assert_eq!(got, reference_scan(&table, "", &filters));
         assert!(got.len() < table.stats.total_rows as usize, "filter should exclude some rows");
     }

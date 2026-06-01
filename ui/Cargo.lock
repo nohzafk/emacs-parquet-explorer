@@ -684,6 +684,9 @@ dependencies = [
 name = "emacs-parquet-explorer-ui"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
  "bytes",
  "eframe",
  "egui",

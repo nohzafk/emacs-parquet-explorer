@@ -1,5 +1,10 @@
 use emacs_egui_sdk::{EguiEmacsApp, ThemeColors};
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
+use parquet::arrow::ProjectionMask;
+use arrow_array::{Array, ArrayRef, StringArray};
+use arrow_cast::cast;
+use arrow_schema::DataType;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 #[cfg(target_arch = "wasm32")]
@@ -93,64 +98,96 @@ impl ParquetTable {
             return Ok(Vec::new());
         }
 
-        let reader = SerializedFileReader::new(self.bytes.clone()).map_err(|e| e.to_string())?;
-        
-        let num_row_groups = reader.metadata().num_row_groups();
-        let mut rg_ranges = Vec::new();
-        let mut current_offset = 0;
-        for rg_idx in 0..num_row_groups {
-            let rg_rows = reader.metadata().row_group(rg_idx).num_rows() as usize;
-            rg_ranges.push(current_offset..(current_offset + rg_rows));
-            current_offset += rg_rows;
-        }
+        // Sorted, de-duplicated targets drive a RowSelection so the Arrow reader
+        // materializes only the requested rows and skips the rest.
+        let mut sorted: Vec<usize> = indices.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
 
-        let mut sorted_req: Vec<(usize, usize)> = indices.iter().cloned().enumerate().collect();
-        sorted_req.sort_by_key(|&(_, val)| val);
+        let reader = ParquetRecordBatchReaderBuilder::try_new(self.bytes.clone())
+            .map_err(|e| e.to_string())?
+            .with_row_selection(row_selection_for(&sorted))
+            .with_batch_size(1024)
+            .build()
+            .map_err(|e| e.to_string())?;
 
-        let mut decoded_rows = vec![Vec::new(); indices.len()];
-
-        let mut req_idx = 0;
-        for rg_idx in 0..num_row_groups {
-            let rg_range = &rg_ranges[rg_idx];
-            
-            if req_idx >= sorted_req.len() || sorted_req[req_idx].1 >= rg_range.end {
-                continue;
-            }
-
-            let rg_reader = reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
-            let mut row_iter = rg_reader.get_row_iter(None).map_err(|e| e.to_string())?;
-            
-            let mut current_rg_row = 0;
-            while req_idx < sorted_req.len() && rg_range.contains(&sorted_req[req_idx].1) {
-                let target_global_idx = sorted_req[req_idx].1;
-                let target_rg_idx = target_global_idx - rg_range.start;
-
-                let mut skipped_all = true;
-                while current_rg_row < target_rg_idx {
-                    if row_iter.next().is_none() {
-                        skipped_all = false;
-                        break;
-                    }
-                    current_rg_row += 1;
-                }
-
-                if skipped_all {
-                    if let Some(record) = row_iter.next() {
-                        let record = record.map_err(|e| e.to_string())?;
-                        let mut row = Vec::new();
-                        for (_, field) in record.get_column_iter() {
-                            row.push(format!("{}", field));
-                        }
-                        let orig_pos = sorted_req[req_idx].0;
-                        decoded_rows[orig_pos] = row;
-                        current_rg_row += 1;
-                    }
-                }
-                req_idx += 1;
+        // Selected rows arrive in ascending file order, i.e. the order of `sorted`.
+        let mut sorted_rows: Vec<Vec<String>> = Vec::with_capacity(sorted.len());
+        for batch in reader {
+            let batch = batch.map_err(|e| e.to_string())?;
+            let utf8 = batch_to_utf8(&batch)?;
+            let cols = downcast_utf8(&utf8);
+            for r in 0..batch.num_rows() {
+                sorted_rows.push((0..cols.len()).map(|c| utf8_cell(&cols, r, c).to_string()).collect());
             }
         }
 
-        Ok(decoded_rows)
+        if sorted_rows.len() != sorted.len() {
+            return Err(format!(
+                "row subset decode mismatch: requested {} rows, decoded {}",
+                sorted.len(),
+                sorted_rows.len()
+            ));
+        }
+
+        // Map the ascending results back to the caller's requested order.
+        let mut pos = std::collections::HashMap::with_capacity(sorted.len());
+        for (k, &g) in sorted.iter().enumerate() {
+            pos.insert(g, k);
+        }
+        Ok(indices.iter().map(|&g| sorted_rows[pos[&g]].clone()).collect())
+    }
+}
+
+/// Build a RowSelection that selects exactly the given ascending, de-duplicated
+/// global row indices, coalescing consecutive runs into single selectors.
+fn row_selection_for(sorted: &[usize]) -> RowSelection {
+    let mut selectors = Vec::new();
+    let mut prev_end = 0usize;
+    let mut i = 0;
+    while i < sorted.len() {
+        let start = sorted[i];
+        let mut end = start + 1;
+        let mut j = i + 1;
+        while j < sorted.len() && sorted[j] == end {
+            end += 1;
+            j += 1;
+        }
+        if start > prev_end {
+            selectors.push(RowSelector::skip(start - prev_end));
+        }
+        selectors.push(RowSelector::select(end - start));
+        prev_end = end;
+        i = j;
+    }
+    RowSelection::from(selectors)
+}
+
+/// Cast every column of a batch to Utf8 once (vectorized) so values can be read
+/// and searched as text with consistent formatting.
+fn batch_to_utf8(batch: &arrow_array::RecordBatch) -> Result<Vec<ArrayRef>, String> {
+    batch
+        .columns()
+        .iter()
+        .map(|c| cast(c, &DataType::Utf8).map_err(|e| e.to_string()))
+        .collect()
+}
+
+/// Borrow each cast column as a concrete StringArray for fast cell access.
+fn downcast_utf8(cols: &[ArrayRef]) -> Vec<&StringArray> {
+    cols.iter()
+        .map(|a| a.as_any().downcast_ref::<StringArray>().expect("cast to Utf8 yields StringArray"))
+        .collect()
+}
+
+/// Read cell (row, col) as text, rendering null as "null".
+#[inline]
+fn utf8_cell<'a>(cols: &[&'a StringArray], row: usize, col: usize) -> &'a str {
+    let a = cols[col];
+    if a.is_null(row) {
+        "null"
+    } else {
+        a.value(row)
     }
 }
 
@@ -1095,13 +1132,17 @@ fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
 
 /// Decide whether a single decoded row passes the global search query and every
 /// column filter. `query` is expected pre-lowercased (ASCII).
-fn row_matches(
-    row: &[String],
+fn row_matches<S: AsRef<str>>(
+    row: &[S],
     query: &str,
     filters: &[ColumnFilter],
     columns: &[String],
 ) -> bool {
-    if !query.is_empty() && !row.iter().any(|cell| ascii_contains_ignore_case(cell, query)) {
+    if !query.is_empty()
+        && !row
+            .iter()
+            .any(|cell| ascii_contains_ignore_case(cell.as_ref(), query))
+    {
         return false;
     }
 
@@ -1113,7 +1154,7 @@ fn row_matches(
             return false;
         }
 
-        let cell_val = &row[col_idx];
+        let cell_val = row[col_idx].as_ref();
         let f_val = &filter.value;
         let cell_num = cell_val.trim().parse::<f64>();
         let filter_num = f_val.trim().parse::<f64>();
@@ -1156,32 +1197,70 @@ async fn scan_and_filter_indices(
     filters: Vec<ColumnFilter>,
     version: usize,
 ) -> Result<FilterResult, String> {
-    let reader = SerializedFileReader::new(table.bytes.clone()).map_err(|e| e.to_string())?;
-    let mut filtered_indices = Vec::new();
     let query = search_query.to_ascii_lowercase();
+    let mut filtered_indices = Vec::new();
 
-    let row_iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(table.bytes.clone()).map_err(|e| e.to_string())?;
 
-    let mut current_idx = 0;
-    for record_res in row_iter {
+    // A global text query must inspect every column; a filter-only scan needs
+    // only the filtered columns, so project those and skip decoding the rest.
+    let mut proj_cols: Vec<usize> = if query.is_empty() {
+        filters
+            .iter()
+            .filter_map(|f| table.columns.iter().position(|c| c == &f.column))
+            .collect()
+    } else {
+        (0..table.columns.len()).collect()
+    };
+    proj_cols.sort_unstable();
+    proj_cols.dedup();
+    if proj_cols.is_empty() {
+        // No column to scan against -> nothing constrains the result.
+        return Ok(FilterResult {
+            indices: (0..table.stats.total_rows as usize).collect(),
+            version,
+        });
+    }
+
+    // Projected batches keep columns in ascending schema order, so the names
+    // line up with the projected column order for row_matches.
+    let proj_names: Vec<String> = proj_cols.iter().map(|&i| table.columns[i].clone()).collect();
+    let mask = ProjectionMask::leaves(builder.parquet_schema(), proj_cols.iter().cloned());
+
+    let reader = builder
+        .with_projection(mask)
+        .with_batch_size(8192)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut global_offset = 0usize;
+    let mut since_yield = 0usize;
+    for batch in reader {
         if LATEST_FILTER_VERSION.load(Ordering::SeqCst) > version {
             return Err("Aborted".to_string());
         }
 
-        let record = record_res.map_err(|e| e.to_string())?;
+        let batch = batch.map_err(|e| e.to_string())?;
+        let nrows = batch.num_rows();
+        let utf8 = batch_to_utf8(&batch)?;
+        let cols = downcast_utf8(&utf8);
 
-        let row_str_vals: Vec<String> = record
-            .get_column_iter()
-            .map(|(_, field)| format!("{}", field))
-            .collect();
-
-        if row_matches(&row_str_vals, &query, &filters, &table.columns) {
-            filtered_indices.push(current_idx);
+        let mut row_buf: Vec<&str> = Vec::with_capacity(cols.len());
+        for r in 0..nrows {
+            row_buf.clear();
+            for c in 0..cols.len() {
+                row_buf.push(utf8_cell(&cols, r, c));
+            }
+            if row_matches(&row_buf, &query, &filters, &proj_names) {
+                filtered_indices.push(global_offset + r);
+            }
         }
 
-        current_idx += 1;
-
-        if current_idx % 25000 == 0 {
+        global_offset += nrows;
+        since_yield += nrows;
+        if since_yield >= 25000 {
+            since_yield = 0;
             yield_to_browser().await;
         }
     }
@@ -1253,6 +1332,72 @@ mod tests {
         // Query AND filter both apply (conjunction).
         assert!(row_matches(&row, "ali", &[cf("fare", ">", "10")], &columns));
         assert!(!row_matches(&row, "bob", &[cf("fare", ">", "10")], &columns));
+    }
+
+    /// Minimal executor: the scan only awaits the (native no-op) yield point, so
+    /// it completes on the first poll.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        fn noop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(fut);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    /// Stream the whole file via Arrow, render rows, apply row_matches -- an
+    /// independent reference for what scan_and_filter_indices should return.
+    fn reference_scan(table: &ParquetTable, query: &str, filters: &[ColumnFilter]) -> Vec<usize> {
+        let q = query.to_ascii_lowercase();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(table.bytes.clone())
+            .unwrap()
+            .with_batch_size(8192)
+            .build()
+            .unwrap();
+        let mut out = Vec::new();
+        let mut off = 0usize;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let utf8 = batch_to_utf8(&batch).unwrap();
+            let cols = downcast_utf8(&utf8);
+            for r in 0..batch.num_rows() {
+                let row: Vec<&str> = (0..cols.len()).map(|c| utf8_cell(&cols, r, c)).collect();
+                if row_matches(&row, &q, filters, &table.columns) {
+                    out.push(off + r);
+                }
+            }
+            off += batch.num_rows();
+        }
+        out
+    }
+
+    #[test]
+    fn test_scan_matches_arrow_reference() {
+        let path = "../yellow_tripdata_2023-01.parquet";
+        let table = parse_parquet(fs::read(path).expect("read parquet")).expect("parse");
+        LATEST_FILTER_VERSION.store(0, Ordering::SeqCst);
+
+        // Global text query: "2023" appears in (nearly) every timestamp, so it
+        // exercises the all-columns projection and timestamp rendering and should
+        // match the vast majority of rows. (A handful of dirty records carry
+        // out-of-range years, so it is not literally every row.)
+        let got = block_on(scan_and_filter_indices(table.clone(), "2023".into(), vec![], 0)).unwrap().indices;
+        assert_eq!(got, reference_scan(&table, "2023", &[]));
+        assert!(got.len() > table.stats.total_rows as usize - 1000 && !got.is_empty());
+
+        // Filter-only scan exercises the projected (single-column) path.
+        let filters = vec![cf("passenger_count", ">", "4")];
+        let got = block_on(scan_and_filter_indices(table.clone(), String::new(), filters.clone(), 0)).unwrap().indices;
+        assert_eq!(got, reference_scan(&table, "", &filters));
+        assert!(got.len() < table.stats.total_rows as usize, "filter should exclude some rows");
     }
 
     #[test]

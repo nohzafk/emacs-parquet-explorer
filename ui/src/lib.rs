@@ -18,6 +18,10 @@ lazy_static::lazy_static! {
 
 static LATEST_FILTER_VERSION: AtomicUsize = AtomicUsize::new(0);
 
+/// Wait this long after the last search keystroke before launching a scan, so
+/// typing a multi-character query triggers a single scan instead of one per key.
+const SEARCH_DEBOUNCE_SECS: f64 = 0.25;
+
 
 pub struct PageLoadResult {
     pub rows: Vec<Vec<String>>,
@@ -305,6 +309,11 @@ pub struct ExplorerApp {
     last_requested_indices: Vec<usize>,
     last_search_query: String,
     last_filters: Vec<ColumnFilter>,
+
+    // Debounce state for the search box: a pending text change and the egui
+    // timestamp (seconds) of the most recent edit.
+    search_pending: bool,
+    search_edit_time: f64,
 }
 
 impl ExplorerApp {
@@ -340,6 +349,9 @@ impl ExplorerApp {
             last_requested_indices: Vec::new(),
             last_search_query: String::new(),
             last_filters: Vec::new(),
+
+            search_pending: false,
+            search_edit_time: 0.0,
         }
     }
 
@@ -437,9 +449,23 @@ impl EguiEmacsApp for ExplorerApp {
         }
 
         if self.parquet_table.is_some() {
-            if self.search_query != self.last_search_query || self.filters != self.last_filters {
-                self.last_search_query = self.search_query.clone();
+            let now = ctx.input(|i| i.time);
+
+            if self.filters != self.last_filters {
+                // Filters are added/removed via discrete clicks -> apply at once.
                 self.last_filters = self.filters.clone();
+                self.last_search_query = self.search_query.clone();
+                self.search_pending = false;
+                self.trigger_filter_update();
+            } else if self.search_query != self.last_search_query {
+                // Text changed this frame: (re)start the debounce timer and make
+                // sure egui wakes up again once the window has elapsed.
+                self.last_search_query = self.search_query.clone();
+                self.search_pending = true;
+                self.search_edit_time = now;
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(SEARCH_DEBOUNCE_SECS));
+            } else if self.search_pending && (now - self.search_edit_time) >= SEARCH_DEBOUNCE_SECS {
+                self.search_pending = false;
                 self.trigger_filter_update();
             }
         }

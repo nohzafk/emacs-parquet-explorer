@@ -231,7 +231,7 @@ sequenceDiagram
 * **Parse-Once, Serve-Many:** The daemon process (`parquet_filter`) parses the Parquet file **once** on initialization. It retains the data in memory and answers subsequent queries instantly.
 * **True Multithreading (`rayon`):** Heavy scan and substring search operations are fanned out across all physical CPU cores using Rust's `rayon` library. On a **3.06 million row** NYC Taxi dataset, a full global text scan finishes in just **297 ms** (down from **2,451 ms** on single-threaded WASM), representing a **~8.2× speedup** over optimized WASM, while a projected single-column numeric filter takes as little as **29 ms**.
 * **Results-by-Reference:** A search query can return millions of matching row indices. To avoid sending large JSON payloads via Emacs scripts, the sidecar writes the indices directly to a temporary file (`/tmp/parquet-filter-*.json`) in binary representation. The WASM UI then retrieves this file via a standard HTTP request to the local `emacs-egui` server, bypassing performance limits of string serialization.
-* **Automatic Runtime Compilation:** When opening a Parquet file for the first time, Emacs asynchronously compiles the sidecar binary using the local Rust toolchain (`cargo build --release --bin parquet_filter`).
+* **Automatic Fallback Compilation:** If the native binary is not compiled during installation (or is subsequently deleted), Emacs will automatically compile it asynchronously in the background using your local Rust toolchain (`cargo build --release --bin parquet_filter`) upon first use, starting the daemon instantly once compilation finishes.
 
 ### 2. The In-WASM Fallback (Safety Net)
 

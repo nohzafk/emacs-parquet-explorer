@@ -3,6 +3,7 @@
 [![Framework](https://img.shields.io/badge/Framework-emacs--egui-8A2BE2.svg?style=flat-square)](https://github.com/nohzafk/emacs-egui)
 [![Rust Version](https://img.shields.io/badge/Rust-2021_Edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Target](https://img.shields.io/badge/Target-WebAssembly-blue.svg?style=flat-square&logo=webassembly)](https://webassembly.org/)
+[![Platform](https://img.shields.io/badge/Platform-macOS-000000.svg?style=flat-square&logo=apple)](#️-requirements)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
 An interactive, GPU-accelerated visual data browser and query tool for large Parquet files, built inside Emacs using Rust and **egui** WebAssembly.
@@ -32,8 +33,35 @@ https://github.com/user-attachments/assets/ed77499d-0b2a-4089-9c0d-edc70d013816
 
 ## ⚙️ Requirements
 
+- **macOS** — the supported and tested platform (see **Platform Support** below).
 - **Emacs 29.1+** built **with xwidget support** (`(featurep 'xwidget-internal)`).
 - A standard **Rust toolchain** (2021 edition) and [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) to compile the WebAssembly UI.
+
+### Platform Support — macOS only (for now)
+
+The UI is an `egui` application compiled to WebAssembly that renders through
+**WebGL** (`eframe`'s `glow` backend) onto an HTML `<canvas>` hosted inside
+Emacs' `xwidget-webkit`. The "GPU-accelerated" experience therefore depends
+entirely on the embedded WebKit view providing **hardware-accelerated WebGL** —
+and that is only reliably true on macOS, because the two platforms embed
+*different* WebKit engines:
+
+- **macOS (supported / tested):** Emacs' xwidget backend is the native
+  `nsxwidget` implementation, which embeds a Cocoa **`WKWebView`** — the same
+  WebKit engine as Safari. WebGL is GPU-accelerated through Metal, so virtual
+  scrolling and grid rendering run smoothly.
+- **Linux (untested / unsupported):** Emacs' xwidget backend is **WebKitGTK**,
+  which Emacs drives via *offscreen rendering*. GPU-accelerated WebGL through
+  that offscreen path is unreliable and driver-dependent — notably blank on
+  NVIDIA with the DMABUF compositor unless `WEBKIT_DISABLE_DMABUF_RENDERER=1` /
+  `WEBKIT_DISABLE_COMPOSITING_MODE=1` are set, and it can silently fall back to
+  software rendering (llvmpipe), defeating the GPU acceleration. Worse,
+  WebKitGTK ≥ 2.41 broke the offscreen rendering that xwidgets rely on, leaving
+  `xwidget-webkit` blank or crashing on several distributions (Emacs
+  [bug#66068](https://debbugs.gnu.org/cgi/bugreport.cgi?bug=66068)). The app may
+  not render at all there, and is currently neither tested nor supported.
+
+> Linux reports and patches are welcome, but treat it as best-effort for now.
 
 ---
 

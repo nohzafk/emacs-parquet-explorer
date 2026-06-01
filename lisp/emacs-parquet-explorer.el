@@ -12,6 +12,8 @@
 
 ;;; Code:
 
+(require 'cl-lib)
+
 (defgroup emacs-parquet-explorer nil
   "Interactive visual explorer for large Parquet files."
   :group 'tools
@@ -25,11 +27,21 @@ the UI scans in-process."
   :type 'boolean
   :group 'emacs-parquet-explorer)
 
-(defvar emacs-parquet-explorer--filter-proc nil
-  "Most recent native filter process; superseded processes are killed.")
+(cl-defstruct (emacs-parquet-explorer--sidecar
+               (:constructor emacs-parquet-explorer--sidecar-make))
+  "State for one session's persistent native filter daemon."
+  proc        ; the long-lived process, or nil
+  filepath    ; parquet file the daemon was started with
+  session     ; emacs-egui session plist (for pushing results back)
+  (busy nil)  ; t while a request is in flight
+  (pending nil)   ; latest queued request plist (latest wins)
+  (acc "")    ; partial stdout line accumulator
+  out         ; temp file of the in-flight request's indices
+  (building nil)  ; t while the one-time cargo build runs
+  inflight)   ; token of the in-flight request
 
-(defvar emacs-parquet-explorer--filter-tmp nil
-  "Temp file holding the most recent native filter result indices.")
+(defvar emacs-parquet-explorer--sidecars (make-hash-table :test 'equal)
+  "Map of session id -> `emacs-parquet-explorer--sidecar'.")
 
 (eval-and-compile
   (defvar emacs-parquet-explorer--dir
@@ -149,51 +161,193 @@ Uses the native Rust exporter."
                        (message "Export failed! Check buffer *Parquet Export* for errors.")
                        (display-buffer buf))))))))
 
-(defun emacs-parquet-explorer--run-filter (session payload)
-  "Run the native `parquet_filter' sidecar for a filter-request PAYLOAD.
-Writes matching row indices to a temp file and pushes its path back to
-SESSION as a filter result keyed by the request token.  A previous
-in-flight scan is superseded (killed) so only the latest query runs."
-  (let* ((token (emacs-egui-get-field payload :token))
-         (filepath (emacs-egui-get-field payload :filepath))
-         (query (or (emacs-egui-get-field payload :query) ""))
-         (filters (or (emacs-egui-get-field payload :filters) "[]"))
-         (manifest-path (expand-file-name
-                         "ui/Cargo.toml"
-                         (expand-file-name "../" emacs-parquet-explorer--dir))))
-    (if (not (and filepath (file-readable-p filepath)))
-        (emacs-egui-send-state
-         session
-         (list :filter_result (list :token token :error "source file not readable")))
-      ;; Supersede any in-flight scan and drop its temp file.
-      (when (process-live-p emacs-parquet-explorer--filter-proc)
-        (delete-process emacs-parquet-explorer--filter-proc))
-      (when (and emacs-parquet-explorer--filter-tmp
-                 (file-exists-p emacs-parquet-explorer--filter-tmp))
-        (ignore-errors (delete-file emacs-parquet-explorer--filter-tmp)))
-      (let ((out-file (make-temp-file "parquet-filter-" nil ".json"))
-            (buf (get-buffer-create " *Parquet Filter*")))
-        (setq emacs-parquet-explorer--filter-tmp out-file)
-        (with-current-buffer buf (erase-buffer))
-        (setq emacs-parquet-explorer--filter-proc
-              (make-process
-               :name "parquet-filter-process"
-               :buffer buf
+;; ---------------------------------------------------------------------------
+;; Native filter sidecar (persistent process)
+;; ---------------------------------------------------------------------------
+
+(defun emacs-parquet-explorer--repo-root ()
+  "Repository root (the parent of the lisp directory)."
+  (expand-file-name "../" emacs-parquet-explorer--dir))
+
+(defun emacs-parquet-explorer--filter-bin ()
+  "Absolute path to the built `parquet_filter' binary."
+  (expand-file-name "ui/target/release/parquet_filter"
+                    (emacs-parquet-explorer--repo-root)))
+
+(defun emacs-parquet-explorer--filter-manifest ()
+  "Absolute path to the UI crate manifest."
+  (expand-file-name "ui/Cargo.toml" (emacs-parquet-explorer--repo-root)))
+
+(defun emacs-parquet-explorer--send-result (session token &rest kv)
+  "Push a filter result for TOKEN (plus KV, e.g. :path/:error) to SESSION."
+  (emacs-egui-send-state session (list :filter_result (apply #'list :token token kv))))
+
+(defun emacs-parquet-explorer--sidecar-send (sc req)
+  "Write REQ (plist :token :query :filters) to SC's daemon with a fresh out file."
+  (let* ((proc (emacs-parquet-explorer--sidecar-proc sc))
+         (out (make-temp-file "parquet-filter-" nil ".json"))
+         (prev (emacs-parquet-explorer--sidecar-out sc))
+         (line (json-encode (list :token (plist-get req :token)
+                                  :query (plist-get req :query)
+                                  :filters (plist-get req :filters)
+                                  :out out))))
+    ;; The previous request's file has already been forwarded; drop it.
+    (when (and prev (file-exists-p prev)) (ignore-errors (delete-file prev)))
+    (setf (emacs-parquet-explorer--sidecar-out sc) out
+          (emacs-parquet-explorer--sidecar-busy sc) t
+          (emacs-parquet-explorer--sidecar-inflight sc) (plist-get req :token))
+    (process-send-string proc (concat line "\n"))))
+
+(defun emacs-parquet-explorer--sidecar-flush (sc)
+  "Send SC's pending request if the daemon is idle and live."
+  (let ((req (emacs-parquet-explorer--sidecar-pending sc)))
+    (when (and req
+               (not (emacs-parquet-explorer--sidecar-busy sc))
+               (process-live-p (emacs-parquet-explorer--sidecar-proc sc)))
+      (setf (emacs-parquet-explorer--sidecar-pending sc) nil)
+      (emacs-parquet-explorer--sidecar-send sc req))))
+
+(defun emacs-parquet-explorer--sidecar-handle-line (sc line)
+  "Parse one response LINE from SC's daemon and forward it to the UI."
+  (let ((line (string-trim line)))
+    (unless (string-empty-p line)
+      (let ((resp (ignore-errors (json-read-from-string line))))
+        (when resp
+          (let ((token (cdr (assq 'token resp)))
+                (path (cdr (assq 'path resp)))
+                (err (cdr (assq 'error resp)))
+                (session (emacs-parquet-explorer--sidecar-session sc)))
+            (setf (emacs-parquet-explorer--sidecar-busy sc) nil
+                  (emacs-parquet-explorer--sidecar-inflight sc) nil)
+            (cond
+             (path (emacs-parquet-explorer--send-result session token :path path))
+             (err (emacs-parquet-explorer--send-result session token :error err)))
+            ;; A newer query may have arrived while we were scanning.
+            (emacs-parquet-explorer--sidecar-flush sc)))))))
+
+(defun emacs-parquet-explorer--sidecar-process-filter (sc chunk)
+  "Accumulate CHUNK from SC's daemon stdout and dispatch complete lines."
+  (let ((acc (concat (emacs-parquet-explorer--sidecar-acc sc) chunk)))
+    (while (string-match "\n" acc)
+      (let ((line (substring acc 0 (match-beginning 0))))
+        (setq acc (substring acc (match-end 0)))
+        (emacs-parquet-explorer--sidecar-handle-line sc line)))
+    (setf (emacs-parquet-explorer--sidecar-acc sc) acc)))
+
+(defun emacs-parquet-explorer--sidecar-start (sc filepath)
+  "Spawn the persistent daemon for FILEPATH and flush any pending request."
+  (setf (emacs-parquet-explorer--sidecar-filepath sc) filepath
+        (emacs-parquet-explorer--sidecar-acc sc) "")
+  (let ((proc (make-process
+               :name "parquet-filter-daemon"
                :noquery t
-               :command (list "cargo" "run" "--release"
-                              "--manifest-path" manifest-path
-                              "--bin" "parquet_filter" "--"
-                              (expand-file-name filepath) query filters out-file)
+               :connection-type 'pipe
+               :stderr (get-buffer-create " *Parquet Filter stderr*")
+               :command (list (emacs-parquet-explorer--filter-bin) "--serve" filepath)
+               :filter (lambda (_p chunk)
+                         (emacs-parquet-explorer--sidecar-process-filter sc chunk))
                :sentinel
-               (lambda (proc event)
-                 (when (string-match-p "\\(finished\\|exited\\)" event)
-                   (if (and (= (process-exit-status proc) 0)
-                            (file-readable-p out-file))
-                       (emacs-egui-send-state
-                        session (list :filter_result (list :token token :path out-file)))
-                     (emacs-egui-send-state
-                      session (list :filter_result (list :token token :error "scan failed")))
-                     (display-buffer buf))))))))))
+               (lambda (p _e)
+                 (unless (process-live-p p)
+                   (let ((token (emacs-parquet-explorer--sidecar-inflight sc)))
+                     (setf (emacs-parquet-explorer--sidecar-proc sc) nil
+                           (emacs-parquet-explorer--sidecar-busy sc) nil
+                           (emacs-parquet-explorer--sidecar-inflight sc) nil)
+                     ;; Don't leave the UI spinning if the daemon died mid-scan.
+                     (when token
+                       (emacs-parquet-explorer--send-result
+                        (emacs-parquet-explorer--sidecar-session sc) token
+                        :error "sidecar exited"))))))))
+    (setf (emacs-parquet-explorer--sidecar-proc sc) proc)
+    (emacs-parquet-explorer--sidecar-flush sc)))
+
+(defun emacs-parquet-explorer--sidecar-build-then-start (sc filepath)
+  "Build `parquet_filter' asynchronously, then start the daemon for FILEPATH."
+  (setf (emacs-parquet-explorer--sidecar-building sc) t)
+  (message "emacs-parquet-explorer: building native filter sidecar...")
+  (make-process
+   :name "parquet-filter-build"
+   :buffer (get-buffer-create " *Parquet Filter build*")
+   :noquery t
+   :command (list "cargo" "build" "--release"
+                  "--manifest-path" (emacs-parquet-explorer--filter-manifest)
+                  "--bin" "parquet_filter")
+   :sentinel
+   (lambda (proc event)
+     (when (string-match-p "\\(finished\\|exited\\)" event)
+       (setf (emacs-parquet-explorer--sidecar-building sc) nil)
+       (if (and (= (process-exit-status proc) 0)
+                (file-executable-p (emacs-parquet-explorer--filter-bin)))
+           (progn
+             (message "emacs-parquet-explorer: native filter sidecar ready")
+             (emacs-parquet-explorer--sidecar-start sc filepath))
+         (let ((req (emacs-parquet-explorer--sidecar-pending sc))
+               (session (emacs-parquet-explorer--sidecar-session sc)))
+           (when req
+             (setf (emacs-parquet-explorer--sidecar-pending sc) nil)
+             (emacs-parquet-explorer--send-result
+              session (plist-get req :token) :error "sidecar build failed"))))))))
+
+(defun emacs-parquet-explorer--sidecar-ensure (sc filepath)
+  "Ensure SC has a live daemon for FILEPATH, building the binary if needed.
+Return non-nil when the daemon is live now (otherwise startup is pending)."
+  (let ((proc (emacs-parquet-explorer--sidecar-proc sc)))
+    (cond
+     ((and (process-live-p proc)
+           (equal (emacs-parquet-explorer--sidecar-filepath sc) filepath))
+      t)
+     (t
+      (when (process-live-p proc) (delete-process proc))
+      (setf (emacs-parquet-explorer--sidecar-proc sc) nil
+            (emacs-parquet-explorer--sidecar-busy sc) nil)
+      (cond
+       ((file-executable-p (emacs-parquet-explorer--filter-bin))
+        (emacs-parquet-explorer--sidecar-start sc filepath)
+        t)
+       (t
+        (unless (emacs-parquet-explorer--sidecar-building sc)
+          (emacs-parquet-explorer--sidecar-build-then-start sc filepath))
+        nil))))))
+
+(defun emacs-parquet-explorer--sidecar-kill (session-id)
+  "Kill the sidecar for SESSION-ID and clean up its temp file."
+  (let ((sc (gethash session-id emacs-parquet-explorer--sidecars)))
+    (when sc
+      (when (process-live-p (emacs-parquet-explorer--sidecar-proc sc))
+        (delete-process (emacs-parquet-explorer--sidecar-proc sc)))
+      (let ((out (emacs-parquet-explorer--sidecar-out sc)))
+        (when (and out (file-exists-p out)) (ignore-errors (delete-file out))))
+      (remhash session-id emacs-parquet-explorer--sidecars))))
+
+(defun emacs-parquet-explorer--run-filter (session payload)
+  "Handle a filter-request PAYLOAD via the persistent native sidecar.
+Records the request as the latest pending (latest wins), (re)starts the
+daemon as needed, and sends the request when the daemon is idle.  The
+daemon parses the Parquet file once and serves subsequent queries from
+memory across all cores."
+  (let* ((session-id (plist-get session :id))
+         (filepath (emacs-egui-get-field payload :filepath))
+         (sc (or (gethash session-id emacs-parquet-explorer--sidecars)
+                 (let ((new (emacs-parquet-explorer--sidecar-make :session session)))
+                   (puthash session-id new emacs-parquet-explorer--sidecars)
+                   (let ((buf (plist-get session :buffer)))
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (add-hook 'kill-buffer-hook
+                                   (lambda ()
+                                     (emacs-parquet-explorer--sidecar-kill session-id))
+                                   nil t))))
+                   new))))
+    (setf (emacs-parquet-explorer--sidecar-session sc) session)
+    (if (not (and filepath (file-readable-p filepath)))
+        (emacs-parquet-explorer--send-result
+         session (emacs-egui-get-field payload :token) :error "source file not readable")
+      (setf (emacs-parquet-explorer--sidecar-pending sc)
+            (list :token (emacs-egui-get-field payload :token)
+                  :query (or (emacs-egui-get-field payload :query) "")
+                  :filters (or (emacs-egui-get-field payload :filters) "[]")))
+      (when (emacs-parquet-explorer--sidecar-ensure sc filepath)
+        (emacs-parquet-explorer--sidecar-flush sc)))))
 
 (provide 'emacs-parquet-explorer)
 ;;; emacs-parquet-explorer.el ends here

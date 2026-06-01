@@ -603,8 +603,8 @@ impl EguiEmacsApp for ExplorerApp {
             if let Some(ref table) = self.parquet_table {
                 // View Mode Select Tabs
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.view_mode, ViewMode::Data, "🗃 Data View");
-                    ui.selectable_value(&mut self.view_mode, ViewMode::Schema, "📋 Schema & Metadata");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Data, "Data View");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Schema, "Schema & Metadata");
 
                     if self.view_mode == ViewMode::Data {
                         ui.add_space(20.0);
@@ -964,7 +964,7 @@ impl EguiEmacsApp for ExplorerApp {
                         ui.columns(2, |columns| {
                             // Column 0: File properties card
                             columns[0].vertical(|ui| {
-                                ui.heading("📋 Physical Properties");
+                                ui.heading("Physical Properties");
                                 ui.separator();
                                 
                                 ui.horizontal(|ui| {
@@ -996,7 +996,7 @@ impl EguiEmacsApp for ExplorerApp {
 
                             // Column 1: Schema descriptor table
                             columns[1].vertical(|ui| {
-                                ui.heading("🧬 Schema & Type Discovery");
+                                ui.heading("Schema & Type Discovery");
                                 ui.separator();
                                 
                                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {

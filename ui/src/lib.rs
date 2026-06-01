@@ -1073,6 +1073,83 @@ pub fn start_app(canvas_id: &str) -> Result<(), JsValue> {
     emacs_egui_sdk::launch_simple(canvas_id, ExplorerApp::new())
 }
 
+/// ASCII case-insensitive substring test that allocates nothing. `needle` must
+/// already be lowercased by the caller. Non-ASCII bytes are compared verbatim,
+/// so matching is Unicode-case-sensitive only for non-ASCII text (acceptable
+/// for tabular data and far cheaper than allocating `to_lowercase()` per cell).
+fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.len() > h.len() {
+        return false;
+    }
+    (0..=h.len() - n.len()).any(|start| {
+        h[start..start + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
+}
+
+/// Decide whether a single decoded row passes the global search query and every
+/// column filter. `query` is expected pre-lowercased (ASCII).
+fn row_matches(
+    row: &[String],
+    query: &str,
+    filters: &[ColumnFilter],
+    columns: &[String],
+) -> bool {
+    if !query.is_empty() && !row.iter().any(|cell| ascii_contains_ignore_case(cell, query)) {
+        return false;
+    }
+
+    for filter in filters {
+        let Some(col_idx) = columns.iter().position(|c| c == &filter.column) else {
+            continue;
+        };
+        if col_idx >= row.len() {
+            return false;
+        }
+
+        let cell_val = &row[col_idx];
+        let f_val = &filter.value;
+        let cell_num = cell_val.trim().parse::<f64>();
+        let filter_num = f_val.trim().parse::<f64>();
+
+        let ok = match (cell_num, filter_num) {
+            (Ok(c_n), Ok(f_n)) => match filter.operator.as_str() {
+                "=" => (c_n - f_n).abs() < 1e-9,
+                ">" => c_n > f_n,
+                "<" => c_n < f_n,
+                ">=" => c_n >= f_n,
+                "<=" => c_n <= f_n,
+                "contains" => ascii_contains_ignore_case(cell_val, &f_val.to_ascii_lowercase()),
+                _ => false,
+            },
+            _ => {
+                let (cl, fl) = (cell_val.to_ascii_lowercase(), f_val.to_ascii_lowercase());
+                match filter.operator.as_str() {
+                    "=" => cl == fl,
+                    "contains" => ascii_contains_ignore_case(cell_val, &fl),
+                    ">" => cl > fl,
+                    "<" => cl < fl,
+                    ">=" => cl >= fl,
+                    "<=" => cl <= fl,
+                    _ => false,
+                }
+            }
+        };
+
+        if !ok {
+            return false;
+        }
+    }
+
+    true
+}
+
 async fn scan_and_filter_indices(
     table: ParquetTable,
     search_query: String,
@@ -1081,10 +1158,10 @@ async fn scan_and_filter_indices(
 ) -> Result<FilterResult, String> {
     let reader = SerializedFileReader::new(table.bytes.clone()).map_err(|e| e.to_string())?;
     let mut filtered_indices = Vec::new();
-    let query = search_query.to_lowercase();
+    let query = search_query.to_ascii_lowercase();
 
     let row_iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
-    
+
     let mut current_idx = 0;
     for record_res in row_iter {
         if LATEST_FILTER_VERSION.load(Ordering::SeqCst) > version {
@@ -1092,67 +1169,13 @@ async fn scan_and_filter_indices(
         }
 
         let record = record_res.map_err(|e| e.to_string())?;
-        
-        let mut row_str_vals = Vec::new();
-        for (_, field) in record.get_column_iter() {
-            row_str_vals.push(format!("{}", field));
-        }
 
-        let mut matches = true;
+        let row_str_vals: Vec<String> = record
+            .get_column_iter()
+            .map(|(_, field)| format!("{}", field))
+            .collect();
 
-        if !query.is_empty() {
-            let global_match = row_str_vals.iter().any(|cell| cell.to_lowercase().contains(&query));
-            if !global_match {
-                matches = false;
-            }
-        }
-
-        if matches && !filters.is_empty() {
-            for filter in &filters {
-                let col_idx = match table.columns.iter().position(|c| c == &filter.column) {
-                    Some(idx) => idx,
-                    None => continue,
-                };
-                if col_idx >= row_str_vals.len() {
-                    matches = false;
-                    break;
-                }
-                
-                let cell_val = &row_str_vals[col_idx];
-                let f_val = &filter.value;
-                
-                let cell_num = cell_val.trim().parse::<f64>();
-                let filter_num = f_val.trim().parse::<f64>();
-                
-                let match_filter = match (cell_num, filter_num) {
-                    (Ok(c_n), Ok(f_n)) => match filter.operator.as_str() {
-                        "=" => (c_n - f_n).abs() < 1e-9,
-                        ">" => c_n > f_n,
-                        "<" => c_n < f_n,
-                        ">=" => c_n >= f_n,
-                        "<=" => c_n <= f_n,
-                        "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
-                        _ => false,
-                    },
-                    _ => match filter.operator.as_str() {
-                        "=" => cell_val.to_lowercase() == f_val.to_lowercase(),
-                        "contains" => cell_val.to_lowercase().contains(&f_val.to_lowercase()),
-                        ">" => cell_val.to_lowercase() > f_val.to_lowercase(),
-                        "<" => cell_val.to_lowercase() < f_val.to_lowercase(),
-                        ">=" => cell_val.to_lowercase() >= f_val.to_lowercase(),
-                        "<=" => cell_val.to_lowercase() <= f_val.to_lowercase(),
-                        _ => false,
-                    }
-                };
-
-                if !match_filter {
-                    matches = false;
-                    break;
-                }
-            }
-        }
-
-        if matches {
+        if row_matches(&row_str_vals, &query, &filters, &table.columns) {
             filtered_indices.push(current_idx);
         }
 
@@ -1181,6 +1204,56 @@ async fn yield_to_browser() {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn cf(column: &str, operator: &str, value: &str) -> ColumnFilter {
+        ColumnFilter {
+            column: column.to_string(),
+            operator: operator.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_ascii_contains_ignore_case() {
+        assert!(ascii_contains_ignore_case("Hello World", "hello"));
+        assert!(ascii_contains_ignore_case("Hello World", "world"));
+        assert!(ascii_contains_ignore_case("ABC123", "c12"));
+        assert!(ascii_contains_ignore_case("anything", "")); // empty needle matches
+        assert!(!ascii_contains_ignore_case("abc", "abcd")); // needle longer
+        assert!(!ascii_contains_ignore_case("Hello", "xyz"));
+    }
+
+    #[test]
+    fn test_row_matches_global_search() {
+        let columns = vec!["name".to_string(), "fare".to_string()];
+        let row = vec!["Alice".to_string(), "23.50".to_string()];
+
+        // Case-insensitive substring across any column.
+        assert!(row_matches(&row, "ali", &[], &columns));
+        assert!(row_matches(&row, "23.5", &[], &columns));
+        assert!(!row_matches(&row, "bob", &[], &columns));
+        // Empty query matches everything.
+        assert!(row_matches(&row, "", &[], &columns));
+    }
+
+    #[test]
+    fn test_row_matches_numeric_and_text_filters() {
+        let columns = vec!["name".to_string(), "fare".to_string()];
+        let row = vec!["Alice".to_string(), "23.50".to_string()];
+
+        // Numeric comparisons parse both sides as f64.
+        assert!(row_matches(&row, "", &[cf("fare", ">", "10")], &columns));
+        assert!(row_matches(&row, "", &[cf("fare", "<", "100")], &columns));
+        assert!(!row_matches(&row, "", &[cf("fare", ">", "30")], &columns));
+        assert!(row_matches(&row, "", &[cf("fare", "=", "23.5")], &columns));
+
+        // Text "contains" filter is case-insensitive.
+        assert!(row_matches(&row, "", &[cf("name", "contains", "LIC")], &columns));
+
+        // Query AND filter both apply (conjunction).
+        assert!(row_matches(&row, "ali", &[cf("fare", ">", "10")], &columns));
+        assert!(!row_matches(&row, "bob", &[cf("fare", ">", "10")], &columns));
+    }
 
     #[test]
     fn test_parquet_lazy_loading() {

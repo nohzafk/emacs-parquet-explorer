@@ -17,6 +17,20 @@
   :group 'tools
   :prefix "emacs-parquet-explorer-")
 
+(defcustom emacs-parquet-explorer-use-native-filter t
+  "When non-nil, offload search/filter scans to the native sidecar.
+Scans run in the multi-threaded `parquet_filter' binary (via
+`make-process') instead of on the single-threaded WASM UI.  When nil,
+the UI scans in-process."
+  :type 'boolean
+  :group 'emacs-parquet-explorer)
+
+(defvar emacs-parquet-explorer--filter-proc nil
+  "Most recent native filter process; superseded processes are killed.")
+
+(defvar emacs-parquet-explorer--filter-tmp nil
+  "Temp file holding the most recent native filter result indices.")
+
 (eval-and-compile
   (defvar emacs-parquet-explorer--dir
     (file-name-directory (or load-file-name
@@ -89,14 +103,25 @@ git submodule update --init --recursive" egui-dir))
                                (emacs-parquet-explorer--run-export abs-input abs-output)))
                          (message "Export cancelled or source file path is invalid.")))))
     
+    ;; 3b. Register callback for native multi-threaded search/filtering
+    (when emacs-parquet-explorer-use-native-filter
+      (emacs-egui-on session "filter-request"
+                     (lambda (payload)
+                       (emacs-parquet-explorer--run-filter session payload))))
+
     ;; 4. Open the buffer in active window
     (switch-to-buffer (plist-get session :buffer))
-    
-    ;; 5. Wait a split second for WASM initialization and push initial state
+
+    ;; 5. Wait a split second for WASM initialization and push initial state.
+    ;;    `native_filter' tells the UI whether to route scans to the sidecar.
     (run-with-timer 0.6 nil
                     (lambda ()
-                      (emacs-egui-send-state session (list :filepath abs-path))))
-    
+                      (emacs-egui-send-state
+                       session
+                       (list :filepath abs-path
+                             :native_filter (if emacs-parquet-explorer-use-native-filter
+                                                 t :json-false)))))
+
     session))
 
 (defun emacs-parquet-explorer--run-export (input-path output-path)
@@ -123,6 +148,52 @@ Uses the native Rust exporter."
                          (message "Successfully exported Parquet to %s" expanded-output)
                        (message "Export failed! Check buffer *Parquet Export* for errors.")
                        (display-buffer buf))))))))
+
+(defun emacs-parquet-explorer--run-filter (session payload)
+  "Run the native `parquet_filter' sidecar for a filter-request PAYLOAD.
+Writes matching row indices to a temp file and pushes its path back to
+SESSION as a filter result keyed by the request token.  A previous
+in-flight scan is superseded (killed) so only the latest query runs."
+  (let* ((token (emacs-egui-get-field payload :token))
+         (filepath (emacs-egui-get-field payload :filepath))
+         (query (or (emacs-egui-get-field payload :query) ""))
+         (filters (or (emacs-egui-get-field payload :filters) "[]"))
+         (manifest-path (expand-file-name
+                         "ui/Cargo.toml"
+                         (expand-file-name "../" emacs-parquet-explorer--dir))))
+    (if (not (and filepath (file-readable-p filepath)))
+        (emacs-egui-send-state
+         session
+         (list :filter_result (list :token token :error "source file not readable")))
+      ;; Supersede any in-flight scan and drop its temp file.
+      (when (process-live-p emacs-parquet-explorer--filter-proc)
+        (delete-process emacs-parquet-explorer--filter-proc))
+      (when (and emacs-parquet-explorer--filter-tmp
+                 (file-exists-p emacs-parquet-explorer--filter-tmp))
+        (ignore-errors (delete-file emacs-parquet-explorer--filter-tmp)))
+      (let ((out-file (make-temp-file "parquet-filter-" nil ".json"))
+            (buf (get-buffer-create " *Parquet Filter*")))
+        (setq emacs-parquet-explorer--filter-tmp out-file)
+        (with-current-buffer buf (erase-buffer))
+        (setq emacs-parquet-explorer--filter-proc
+              (make-process
+               :name "parquet-filter-process"
+               :buffer buf
+               :noquery t
+               :command (list "cargo" "run" "--release"
+                              "--manifest-path" manifest-path
+                              "--bin" "parquet_filter" "--"
+                              (expand-file-name filepath) query filters out-file)
+               :sentinel
+               (lambda (proc event)
+                 (when (string-match-p "\\(finished\\|exited\\)" event)
+                   (if (and (= (process-exit-status proc) 0)
+                            (file-readable-p out-file))
+                       (emacs-egui-send-state
+                        session (list :filter_result (list :token token :path out-file)))
+                     (emacs-egui-send-state
+                      session (list :filter_result (list :token token :error "scan failed")))
+                     (display-buffer buf))))))))))
 
 (provide 'emacs-parquet-explorer)
 ;;; emacs-parquet-explorer.el ends here

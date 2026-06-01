@@ -43,6 +43,26 @@ pub struct FilterResult {
 pub struct ExplorerState {
     #[serde(default)]
     pub filepath: String,
+    /// Set by Emacs at open time when the native filter sidecar is available.
+    #[serde(default)]
+    pub native_filter: bool,
+    /// A scan result pushed back by the native sidecar (token-matched).
+    #[serde(default)]
+    pub filter_result: Option<FilterResultMsg>,
+}
+
+/// Result of a native filter scan, delivered from Emacs. The indices themselves
+/// are not inlined (they can be millions); instead `path` points to a file the
+/// WASM fetches through the asset server. `token` echoes the request's filter
+/// version so stale results are discarded.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FilterResultMsg {
+    #[serde(default)]
+    pub token: usize,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub error: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -358,6 +378,10 @@ pub struct ExplorerApp {
     applied_filters: Vec<ColumnFilter>,
     scanning_query: String,
     scanning_filters: Vec<ColumnFilter>,
+
+    // When true, scans are offloaded to the native sidecar via Emacs instead of
+    // running on the WASM thread.
+    native_filter_available: bool,
 }
 
 impl ExplorerApp {
@@ -401,6 +425,8 @@ impl ExplorerApp {
             applied_filters: Vec::new(),
             scanning_query: String::new(),
             scanning_filters: Vec::new(),
+
+            native_filter_available: false,
         }
     }
 
@@ -421,31 +447,92 @@ impl ExplorerApp {
             return;
         }
 
-        // Incremental narrowing: if the filters are unchanged and the new query
-        // merely extends the applied one (the applied query is a substring of
-        // it), every new match is already inside the current result set, so we
-        // re-scan only those rows. Requires a proper-subset base (a prior query
-        // and/or filters); otherwise fall back to a full scan.
-        let incremental = self.filters == self.applied_filters
-            && self.search_query.contains(&self.applied_query)
-            && (!self.applied_query.is_empty() || !self.applied_filters.is_empty());
-        let base = incremental.then(|| self.filtered_indices.clone());
-
         self.filtering_in_progress = true;
         self.scanning_query = self.search_query.clone();
         self.scanning_filters = self.filters.clone();
 
+        if self.native_filter_available {
+            // Offload the full scan to the native multi-core sidecar via Emacs.
+            self.emit_filter_request(new_version);
+        } else {
+            // Single-threaded WASM scan with incremental narrowing: if the
+            // filters are unchanged and the new query merely extends the applied
+            // one (the applied query is a substring of it), every new match is
+            // already inside the current result set, so re-scan only those rows.
+            let incremental = self.filters == self.applied_filters
+                && self.search_query.contains(&self.applied_query)
+                && (!self.applied_query.is_empty() || !self.applied_filters.is_empty());
+            let base = incremental.then(|| self.filtered_indices.clone());
+            self.spawn_local_scan(new_version, base);
+        }
+    }
+
+    /// Spawn the in-WASM async scan for `version`, routing the result through the
+    /// FILTER_RESULTS channel that `update` polls. Uses the in-flight
+    /// `scanning_query`/`scanning_filters`.
+    fn spawn_local_scan(&self, version: usize, base: Option<Vec<usize>>) {
+        let Some(ref table) = self.parquet_table else {
+            return;
+        };
         let table_cloned = table.clone();
-        let query_cloned = self.search_query.clone();
-        let filters_cloned = self.filters.clone();
-        let version = new_version;
+        let query = self.scanning_query.clone();
+        let filters = self.scanning_filters.clone();
 
         emacs_egui_sdk::wasm_bindgen_futures::spawn_local(async move {
             let scan_res =
-                scan_and_filter_indices(table_cloned, query_cloned, filters_cloned, base, version)
-                    .await;
+                scan_and_filter_indices(table_cloned, query, filters, base, version).await;
             if let Ok(mut guard) = FILTER_RESULTS.lock() {
                 *guard = Some(scan_res);
+            }
+        });
+    }
+
+    /// Ask Emacs to run the native sidecar scan for the current query/filters.
+    /// `token` is echoed back so stale results can be discarded.
+    fn emit_filter_request(&self, token: usize) {
+        emacs_egui_sdk::emacs_post_message(
+            "filter-request",
+            serde_json::json!({
+                "token": token,
+                "filepath": self.filepath,
+                "query": self.search_query,
+                // JSON string -> Emacs passes it straight to the CLI.
+                "filters": serde_json::to_string(&self.filters).unwrap_or_else(|_| "[]".to_string()),
+            }),
+        );
+    }
+
+    /// Apply a native scan result pushed back from Emacs. Stale tokens are
+    /// ignored; on error we fall back to a local scan; otherwise the index file
+    /// is fetched and routed through the FILTER_RESULTS channel.
+    fn handle_filter_result(&mut self, fr: FilterResultMsg) {
+        if fr.token != self.filter_version {
+            return; // superseded by a newer request
+        }
+        if !fr.error.is_empty() {
+            self.spawn_local_scan(fr.token, None);
+            return;
+        }
+        if fr.path.is_empty() {
+            self.filtering_in_progress = false;
+            return;
+        }
+
+        let url = emacs_egui_sdk::file_url(&fr.path);
+        let token = fr.token;
+        emacs_egui_sdk::wasm_bindgen_futures::spawn_local(async move {
+            let res = match emacs_egui_sdk::fetch_bytes(&url).await {
+                Ok(bytes) => match serde_json::from_slice::<Vec<usize>>(&bytes) {
+                    Ok(indices) => Ok(FilterResult {
+                        indices,
+                        version: token,
+                    }),
+                    Err(e) => Err(format!("filter result parse error: {e}")),
+                },
+                Err(_) => Err("filter result fetch error".to_string()),
+            };
+            if let Ok(mut guard) = FILTER_RESULTS.lock() {
+                *guard = Some(res);
             }
         });
     }
@@ -456,6 +543,17 @@ impl EguiEmacsApp for ExplorerApp {
     type State = ExplorerState;
 
     fn on_state_update(&mut self, state: Self::State) {
+        // A native scan result pushed back from Emacs.
+        if let Some(fr) = state.filter_result {
+            self.handle_filter_result(fr);
+            return;
+        }
+
+        // Capability flag, sent once with the initial open.
+        if state.native_filter {
+            self.native_filter_available = true;
+        }
+
         if state.filepath.is_empty() || state.filepath == self.filepath {
             return;
         }

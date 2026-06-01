@@ -5,13 +5,15 @@ use std::time::Instant;
 /// a global text query and/or column filters, parallelized across all cores,
 /// and prints the matching row indices as a JSON array on stdout.
 ///
-/// Usage: parquet_filter <input.parquet> [query] [filters-json]
+/// Usage: parquet_filter <input.parquet> [query] [filters-json] [out-file]
 ///   query        global case-insensitive substring (empty = no text query)
 ///   filters-json JSON array of {"column","operator","value"} objects
+///   out-file     write the index JSON here instead of stdout (used by the
+///                Emacs broker so the WASM UI can fetch it via the asset server)
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: parquet_filter <input.parquet> [query] [filters-json]");
+        eprintln!("Usage: parquet_filter <input.parquet> [query] [filters-json] [out-file]");
         std::process::exit(1);
     }
 
@@ -21,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(j) if !j.is_empty() => serde_json::from_str(j)?,
         _ => Vec::new(),
     };
+    let out_file = args.get(4).filter(|s| !s.is_empty());
 
     let bytes = std::fs::read(path)?;
     let table = match parse_parquet(bytes) {
@@ -53,7 +56,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         threads
     );
 
-    // stdout carries the result payload for the (future) Emacs broker.
-    println!("{}", serde_json::to_string(&indices)?);
+    // Result payload for the Emacs broker: a JSON array of matching row indices.
+    let payload = serde_json::to_string(&indices)?;
+    match out_file {
+        Some(path) => std::fs::write(path, payload)?,
+        None => println!("{}", payload),
+    }
     Ok(())
 }

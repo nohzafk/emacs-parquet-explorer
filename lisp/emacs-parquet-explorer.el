@@ -45,10 +45,15 @@ the UI scans in-process."
 
 (eval-and-compile
   (defvar emacs-parquet-explorer--dir
-    (file-name-directory (or load-file-name
-                             (bound-and-true-p byte-compile-current-file)
-                             buffer-file-name
-                             default-directory))
+    ;; `file-truename': a package manager may expose lisp/ through a
+    ;; symlink (Emacs 31's `user-lisp-directory'), and the bundled
+    ;; emacs-egui and the ui/ directory are found relative to the real
+    ;; checkout, not to the link.
+    (file-name-directory
+     (file-truename (or load-file-name
+                        (bound-and-true-p byte-compile-current-file)
+                        buffer-file-name
+                        default-directory)))
     "Directory containing the emacs-parquet-explorer package files.")
 
   ;; emacs-egui is not published to MELPA and is intentionally NOT declared in
